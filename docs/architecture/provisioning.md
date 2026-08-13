@@ -1,0 +1,43 @@
+# Tenant Provisioning
+
+## State machine
+
+```
+PENDING → PROVISIONING → READY
+                ↓
+              FAILED (retryable → back to PROVISIONING)
+
+READY → SUSPENDED → READY (reactivation)
+READY → DELETING → DELETED
+```
+
+Each transition is recorded in `tenant_provisioning_events` (see [database-per-tenant.md](database-per-tenant.md)) so the pipeline can determine "what was the last successful step" rather than needing its own separate progress-tracking mechanism. `tenants.status` always reflects current state; the events table is the audit trail.
+
+## Lifecycle steps (mapped to the brief's 14-step sequence)
+
+1. Platform user signs up → creates a central-DB record only, `status = PENDING`. No tenant database exists yet.
+2. Platform (or the signup flow itself) transitions `status = PROVISIONING` and dispatches the provisioning job chain.
+3. Generate tenant identifier — `slug` uniqueness check, `uuid` assigned.
+4. Generate database name — deterministic from tenant id/uuid (e.g. `tenant_{id}`), stored in `tenants.db_name` for auditability rather than re-derived every time.
+5. **Create tenant database** — `CreateTenantDatabase` job. Idempotent: checks `SHOW DATABASES LIKE ...` (or equivalent) before issuing `CREATE DATABASE`; a re-run after partial failure is a no-op if the DB already exists.
+6. **Configure tenant database connection** — dynamically register the connection config (`config(['database.connections.tenant' => [...]])` + `DB::purge('tenant')`), the mechanism `stancl/tenancy`'s `DatabaseTenancyBootstrapper` provides.
+7. **Run Bagisto migrations** — `migrate` (not `migrate:fresh` — `migrate:fresh` drops all tables first, which is what Bagisto's own Installer does for a *single* app install; it is wrong for tenant provisioning where we want a clean, idempotent, additive migrate) against the tenant connection, covering every `packages/Webkul/*/src/Database/Migrations` folder Concord already knows about.
+8. **Run required Bagisto seeders** — reuse `BagistoDatabaseSeeder` (from `packages/Webkul/Installer/src/Database/Seeders`) bound to the tenant connection — seeds default channel, locale, currency, roles. Pass whatever parameters the Installer flow passes for `skip_admin_creation: true`, since we create the admin ourselves in step 10 with tenant-specific details rather than Bagisto's hardcoded `admin@example.com`.
+9. **Run our SaaS tenant migrations** — only if Phase 9's tenant-side snapshot table (see [database-per-tenant.md](database-per-tenant.md)) is actually implemented; otherwise this step is a no-op by design.
+10. **Create initial tenant admin** — insert into the tenant DB's `admins` table with the signup user's actual email, not Bagisto's Installer default (`admin@example.com`, `id=1`) — this is the one place we deliberately diverge from copying the Installer flow verbatim, since a real platform can't hardcode every tenant's admin email to the same address.
+11. **Configure default channel/store** — already covered by step 8's seeder; verify (not re-seed) that a default channel with the correct `hostname` (the tenant's assigned subdomain) exists — Bagisto's seeded default channel needs its `hostname` set to the tenant's actual domain, which is tenant-specific and can't come from the generic seeder, so this is a small explicit step after seeding.
+12. **Configure tenant domain/subdomain** — create the `domains` row (central DB) linking `{slug}.platform.<domain>` to this tenant, `is_primary = true`.
+13. **Mark provisioning as completed** — `status = READY`.
+14. **Tenant can access store/admin** — no further action; the domain-routing middleware (see [domain-routing.md](domain-routing.md)) now resolves this tenant normally.
+
+## Idempotency / safe retry
+
+Every job in the chain (`CreateTenantDatabase`, `MigrateTenantDatabase`, `SeedTenantDatabase`, `CreateTenantAdmin`) checks the tenant's current recorded state before acting and no-ops if its step already succeeded, rather than relying on the job queue's own retry semantics alone. This directly avoids the trap identified in [RISK_REGISTER.md](../../RISK_REGISTER.md) R11: Bagisto's own Installer determines "is this installed?" via a flat file (`storage_path('installed')`) and an `admins` table row count (`DatabaseManager::isInstalled()`) — both are fragile, global-state checks unsuited to N independently-provisioned tenants. Our pipeline instead trusts `tenants.status` plus the `tenant_provisioning_events` audit trail as the single source of truth for "what step are we on."
+
+If provisioning fails, `status = FAILED` with the triggering error recorded on the relevant `tenant_provisioning_events` row. A `platform:tenants:reap-failed` scheduled command identifies tenants stuck in `FAILED` (or stuck in `PROVISIONING` past a timeout, indicating a crashed worker) and either automatically retries or surfaces them to platform admins for manual intervention/cleanup, per the brief's requirement to "identify state, retry safely, avoid duplicate data, allow cleanup/rollback."
+
+## Suspension and deletion
+
+`SUSPENDED`: tenant database and data are untouched; the domain-routing middleware refuses to resolve the tenant to a working store (shows a suspension page instead) — enforced centrally, before any tenant DB connection is even established, so suspension cannot be bypassed by a request that skips some later check (see [security.md](security.md)).
+
+`DELETING` → `DELETED`: drops the tenant database after (a) an explicit confirmation step and (b) optionally an export/backup step, per the brief's future-scale requirement for tenant export. The exact backup mechanism is out of scope for Phase 0 architecture and should be designed alongside Phase 18 (production deployment) once actual backup infrastructure is chosen.

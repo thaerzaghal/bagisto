@@ -47,6 +47,7 @@
         "simplesoftwareio/simple-qrcode": "^4.2",
         "spatie/laravel-responsecache": "^7.4",
         "spatie/laravel-sitemap": "^7.3",
+        "stancl/tenancy": "^3.10",
         "stevebauman/purify": "^6.3",
         "stripe/stripe-php": "^17.3",
         "web-token/jwt-framework": "^4.1"
@@ -68,6 +69,7 @@
             "App\\": "app/",
             "Database\\Factories\\": "database/factories/",
             "Database\\Seeders\\": "database/seeders/",
+            "Platform\\Tenancy\\": "packages/Platform/Tenancy/src",
             "Webkul\\Admin\\": "packages/Webkul/Admin/src",
             "Webkul\\Attribute\\": "packages/Webkul/Attribute/src",
             "Webkul\\BookingProduct\\": "packages/Webkul/BookingProduct/src",

@@ -8,6 +8,8 @@ use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Foundation\Http\Middleware\PreventRequestsDuringMaintenance;
+use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
+use Stancl\Tenancy\Middleware\InitializeTenancyByDomain;
 use Webkul\Core\Http\Middleware\SecureHeaders;
 use Webkul\Installer\Http\Middleware\CanInstall;
 
@@ -41,6 +43,37 @@ return Application::configure(basePath: dirname(__DIR__))
          */
         $middleware->replaceInGroup('web', BaseEncryptCookies::class, EncryptCookies::class);
 
+        /**
+         * TASK-ARCH-003: prepend tenant domain resolution to the 'web' middleware
+         * GROUP DEFINITION itself (not just to our own routes/tenant.php, which is
+         * a separate route file). Bagisto's Admin AND Shop packages both register
+         * their routes with ['web', ...] by name (see
+         * Webkul\Admin\Providers\AdminServiceProvider, Webkul\Shop\Providers\
+         * ShopServiceProvider) - since Laravel resolves the 'web' alias to
+         * whatever middleware list is registered here at boot time, this makes
+         * EVERY real Bagisto admin/shop route tenant-aware automatically, with
+         * zero changes to any packages/Webkul file. This is the same extension
+         * point Bagisto's own team already uses one line above
+         * (replaceInGroup('web', ...)) for the EncryptCookies override.
+         *
+         * Must run before StartSession (part of the base 'web' group) - the
+         * `sessions` table lives inside each tenant's own database
+         * (SESSION_DRIVER=database), so the DB connection must already be
+         * switched before session middleware touches it. prependToGroup() puts
+         * it first in the group; Platform\Tenancy\Providers\TenancyServiceProvider
+         * ::makeTenancyMiddlewareHighestPriority() additionally pins its relative
+         * priority, so both mechanisms agree on the ordering.
+         *
+         * Unresolved domains (including the central domains, since no real
+         * platform routes exist yet - see docs/architecture/domain-routing.md)
+         * throw Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException,
+         * mapped to a plain 404 below - never a fallback to any tenant, and
+         * never a raw 500 with a stack trace.
+         */
+        $middleware->prependToGroup('web', [
+            InitializeTenancyByDomain::class,
+        ]);
+
         $middleware->validateCsrfTokens(except: [
             'stripe/*',
         ]);
@@ -51,5 +84,7 @@ return Application::configure(basePath: dirname(__DIR__))
         //
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        //
+        $exceptions->render(function (TenantCouldNotBeIdentifiedException $e, $request) {
+            return response()->json(['message' => 'Not Found'], 404);
+        });
     })->create();

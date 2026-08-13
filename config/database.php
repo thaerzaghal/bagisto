@@ -62,6 +62,51 @@ return [
             ]) : [],
         ],
 
+        /*
+        |----------------------------------------------------------------------
+        | Tenant provisioning connection (TASK-ARCH-002, RISK_REGISTER.md R18)
+        |----------------------------------------------------------------------
+        |
+        | Used ONLY by Platform\Tenancy\Services\TenantProvisioner (via
+        | config/tenancy.php's database.template_tenant_connection) to
+        | CREATE DATABASE / CREATE USER when a tenant is first provisioned.
+        | Never used for ordinary application queries and never becomes a
+        | tenant's own runtime connection (see config/tenancy.php for why).
+        |
+        | Required grants for this MySQL user (documented, not automated -
+        | production secret management/user creation is deferred per the
+        | task brief): CREATE, DROP, CREATE USER, GRANT OPTION - at minimum
+        | `ON *.*` since the target tenant database does not exist yet at
+        | CREATE DATABASE time. This is narrower than root (no DML/DDL on
+        | unrelated schemas is implied by these grants) but is still a
+        | meaningfully privileged account and must not be used for anything
+        | else. Defaults to the same credentials as the `mysql` connection
+        | so local/spike environments keep working unconfigured; production
+        | MUST set DB_PROVISION_USERNAME/DB_PROVISION_PASSWORD to a distinct,
+        | narrowly-granted user - see docs/architecture/provisioning.md.
+        |
+        */
+
+        'tenant_provisioning' => [
+            'driver' => 'mysql',
+            'url' => env('DB_URL'),
+            'host' => env('DB_HOST', '127.0.0.1'),
+            'port' => env('DB_PORT', '3306'),
+            'database' => env('DB_DATABASE', 'laravel'),
+            'username' => env('DB_PROVISION_USERNAME', env('DB_USERNAME', 'root')),
+            'password' => env('DB_PROVISION_PASSWORD', env('DB_PASSWORD', '')),
+            'unix_socket' => env('DB_SOCKET', ''),
+            'charset' => env('DB_CHARSET', 'utf8mb4'),
+            'collation' => env('DB_COLLATION', 'utf8mb4_unicode_ci'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => false,
+            'engine' => null,
+            'options' => extension_loaded('pdo_mysql') ? array_filter([
+                PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
+            ]) : [],
+        ],
+
         'mariadb' => [
             'driver' => 'mariadb',
             'url' => env('DB_URL'),

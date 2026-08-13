@@ -1,6 +1,7 @@
 <?php
 
 use App\Providers\AppServiceProvider;
+use Platform\Tenancy\Providers\TenancyServiceProvider;
 use Webkul\Admin\Providers\AdminServiceProvider;
 use Webkul\Attribute\Providers\AttributeServiceProvider;
 use Webkul\BookingProduct\Providers\BookingProductServiceProvider;
@@ -49,6 +50,14 @@ return [
      * Application service providers.
      */
     AppServiceProvider::class,
+
+    /**
+     * Platform tenancy provider — must boot before every Webkul provider below
+     * (specifically CoreServiceProvider) so tenant DB/cache/filesystem/queue
+     * context is established before any Bagisto code resolves a connection,
+     * channel, or config value. See docs/architecture/tenancy.md (R9).
+     */
+    TenancyServiceProvider::class,
 
     /**
      * Webkul's service providers.
