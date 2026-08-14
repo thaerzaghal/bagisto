@@ -7,6 +7,7 @@ namespace Platform\Tenancy\Services;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use RuntimeException;
@@ -46,6 +47,7 @@ class TenantProvisioner
 
         try {
             $this->ensureDatabaseCreated($tenant);
+            $this->ensureFilesystemPrepared($tenant);
             $this->ensureMigrated($tenant);
             $this->ensureSeeded($tenant);
 
@@ -77,7 +79,61 @@ class TenantProvisioner
     }
 
     /**
-     * Step 2: run every Bagisto package migration (discovered dynamically,
+     * Step 2 (TASK-ARCH-005, RISK_REGISTER.md R16): create the directory
+     * skeleton Stancl\Tenancy\Bootstrappers\FilesystemTenancyBootstrapper
+     * needs to already exist. That bootstrapper only REMAPS config (disk
+     * roots, storage_path()) - it never creates a single directory itself
+     * (confirmed by reading its source). Two things need to physically exist
+     * before migrate/seed run inside this tenant's context:
+     *
+     * 1. storage/tenant{id}/framework/{cache/data,sessions,views,testing} and
+     *    storage/tenant{id}/logs - because 'suffix_storage_path' is true,
+     *    storage_path() itself (not just disk roots) is suffixed once
+     *    tenancy initializes, and Laravel/prettus-l5-repository/session
+     *    handling all assume these exist under whatever storage_path()
+     *    currently resolves to (this exact gap crashed a warning in
+     *    TASK-ARCH-001 before the bootstrapper was disabled to work around
+     *    it - now it's handled properly instead of avoided).
+     * 2. The 'public' and 'private' disk roots themselves - Storage::put()
+     *    on Laravel's local driver does create intermediate directories for
+     *    the FILE being written, but not proactively for an empty disk root,
+     *    and some read paths (Storage::exists(''), directory listings) are
+     *    more predictable if the root already exists.
+     *
+     * Runs inside tenant->run() so storage_path()/Storage::disk(...) both
+     * reflect this tenant's already-remapped paths (FilesystemTenancyBootstrapper
+     * has already executed by the time the closure body runs). Idempotent:
+     * every directory is guarded with is_dir()/Storage::exists() before
+     * creation, safe to call again after a partial-failure retry.
+     */
+    protected function ensureFilesystemPrepared(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            foreach ([
+                'app/public',
+                'framework/cache/data',
+                'framework/sessions',
+                'framework/views',
+                'framework/testing',
+                'logs',
+            ] as $relative) {
+                $path = storage_path($relative);
+
+                if (! is_dir($path)) {
+                    mkdir($path, 0755, true);
+                }
+            }
+
+            foreach (['public', 'private'] as $disk) {
+                if (! Storage::disk($disk)->exists('')) {
+                    Storage::disk($disk)->makeDirectory('');
+                }
+            }
+        });
+    }
+
+    /**
+     * Step 3: run every Bagisto package migration (discovered dynamically,
      * not a maintained list - see docs/architecture/provisioning.md "Bagisto
      * tenant migration strategy") plus anything under database/migrations/tenant,
      * against this tenant's database only. Idempotent via Laravel's own
@@ -94,7 +150,7 @@ class TenantProvisioner
     }
 
     /**
-     * Step 3: seed Bagisto's own default data (channel, locale, currency,
+     * Step 4: seed Bagisto's own default data (channel, locale, currency,
      * attribute family, admin role/user, ...) via the same DatabaseSeeder
      * class Bagisto's own Installer uses - NOT via the Installer command
      * itself (see RISK_REGISTER.md R11/ADR-001).

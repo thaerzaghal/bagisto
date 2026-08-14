@@ -30,7 +30,21 @@ use Webkul\Product\Repositories\ProductRepository;
 // rather than accidentally relying on transaction rollback for central rows.
 uses(Tests\Feature\Platform\PlatformIntegrationTestCase::class);
 
-const TEST_TENANT_IDS = ['tenant-a', 'tenant-b', 'tenant-bad`id'];
+// TASK-ARCH-005 FIX: uses dedicated tenant-prov-* ids, not the shared
+// tenant-a/tenant-b ids TenantCacheIsolationTest.php, TenantDomainRoutingTest.php,
+// and TenantStorageIsolationTest.php reuse across tests for cheap, idempotent
+// fixture sharing (see those files' beforeEach docblocks). This file's own
+// tests genuinely need a from-scratch tenant each time (they test the
+// provisioning lifecycle itself - "create from Pending", "fail and never
+// reach Ready", "retry from Pending again"), so it always runs a full
+// cleanup+recreate cycle via beforeEach/afterEach below - correct for what
+// THIS file tests, but reusing 'tenant-prov-a'/'tenant-prov-b' caused cross-file
+// contamination when the whole tests/Feature/Platform/ suite ran together
+// (this file's beforeEach silently deleted the OTHER files' shared fixture
+// mid-run, taking their seeded products with it). Distinct ids remove the
+// possibility of that interaction entirely, regardless of which file Pest
+// happens to execute first.
+const TEST_TENANT_IDS = ['tenant-prov-a', 'tenant-prov-b', 'tenant-prov-bad`id'];
 
 function cleanupTestTenants(): void
 {
@@ -68,8 +82,8 @@ afterEach(fn () => cleanupTestTenants());
 
 test('a tenant can be created, provisioned end-to-end, and reaches READY with a working real Bagisto repository', function () {
     // 1. Tenant can be created.
-    $tenant = Tenant::create(['id' => 'tenant-a', 'status' => TenantStatus::Pending]);
-    $tenant->domains()->create(['domain' => 'tenant-a.spike.test']);
+    $tenant = Tenant::create(['id' => 'tenant-prov-a', 'status' => TenantStatus::Pending]);
+    $tenant->domains()->create(['domain' => 'tenant-prov-a.spike.test']);
     expect($tenant->status)->toBe(TenantStatus::Pending);
 
     app(TenantProvisioner::class)->provision($tenant);
@@ -81,7 +95,7 @@ test('a tenant can be created, provisioned end-to-end, and reaches READY with a 
 
     // 2. Tenant database can be provisioned (physically exists, isolated name).
     $dbName = $tenant->database()->getName();
-    expect($dbName)->toBe('tenanttenant-a');
+    expect($dbName)->toBe('tenanttenant-prov-a');
     expect($tenant->database()->manager()->databaseExists($dbName))->toBeTrue();
 
     // 2b (R18): runtime connection uses a scoped, non-elevated, tenant-specific
@@ -145,12 +159,12 @@ test('the central database contains only platform tenancy tables, never Bagisto 
 test('two tenants get fully isolated Bagisto schemas and tenant A cannot see tenant B product data', function () {
     $provisioner = app(TenantProvisioner::class);
 
-    $tenantA = Tenant::create(['id' => 'tenant-a', 'status' => TenantStatus::Pending]);
-    $tenantA->domains()->create(['domain' => 'tenant-a.spike.test']);
+    $tenantA = Tenant::create(['id' => 'tenant-prov-a', 'status' => TenantStatus::Pending]);
+    $tenantA->domains()->create(['domain' => 'tenant-prov-a.spike.test']);
     $provisioner->provision($tenantA);
 
-    $tenantB = Tenant::create(['id' => 'tenant-b', 'status' => TenantStatus::Pending]);
-    $tenantB->domains()->create(['domain' => 'tenant-b.spike.test']);
+    $tenantB = Tenant::create(['id' => 'tenant-prov-b', 'status' => TenantStatus::Pending]);
+    $tenantB->domains()->create(['domain' => 'tenant-prov-b.spike.test']);
     $provisioner->provision($tenantB);
 
     expect($tenantA->fresh()->status)->toBe(TenantStatus::Ready);
@@ -179,11 +193,11 @@ test('two tenants get fully isolated Bagisto schemas and tenant A cannot see ten
 
 test('a failure during provisioning marks the tenant FAILED with a recorded error, never READY', function () {
     // A backtick in the tenant id produces an invalid, unescaped
-    // `CREATE DATABASE \`tenanttenant-bad`id\`` statement (MySQLDatabaseManager
+    // `CREATE DATABASE \`tenanttenant-prov-bad`id\`` statement (MySQLDatabaseManager
     // interpolates the database name into raw DDL with no escaping) - a real,
     // deterministic MySQL syntax error, not a simulated/mocked one.
-    $tenant = Tenant::create(['id' => 'tenant-bad`id', 'status' => TenantStatus::Pending]);
-    $tenant->domains()->create(['domain' => 'tenant-bad-id.spike.test']);
+    $tenant = Tenant::create(['id' => 'tenant-prov-bad`id', 'status' => TenantStatus::Pending]);
+    $tenant->domains()->create(['domain' => 'tenant-prov-bad-id.spike.test']);
 
     // Pest's toThrow() only special-cases the argument as a type check when
     // class_exists() is true for it - Throwable is an interface, so
@@ -206,8 +220,8 @@ test('a failure during provisioning marks the tenant FAILED with a recorded erro
 test('provisioning is idempotent: re-running it on an already-READY tenant, or resuming from PENDING again, never duplicates data', function () {
     $provisioner = app(TenantProvisioner::class);
 
-    $tenant = Tenant::create(['id' => 'tenant-a', 'status' => TenantStatus::Pending]);
-    $tenant->domains()->create(['domain' => 'tenant-a.spike.test']);
+    $tenant = Tenant::create(['id' => 'tenant-prov-a', 'status' => TenantStatus::Pending]);
+    $tenant->domains()->create(['domain' => 'tenant-prov-a.spike.test']);
     $provisioner->provision($tenant);
     $tenant->refresh();
     expect($tenant->status)->toBe(TenantStatus::Ready);
@@ -229,7 +243,7 @@ test('provisioning is idempotent: re-running it on an already-READY tenant, or r
     $tenant->refresh();
 
     expect($tenant->status)->toBe(TenantStatus::Ready);
-    expect($tenant->database()->getName())->toBe('tenanttenant-a');
+    expect($tenant->database()->getName())->toBe('tenanttenant-prov-a');
 
     $tenant->run(function () {
         expect(DB::table('channels')->count())->toBe(1);

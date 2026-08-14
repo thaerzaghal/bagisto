@@ -49,9 +49,27 @@ return [
          */
         Stancl\Tenancy\Bootstrappers\CacheTenancyBootstrapper::class,
 
-        // FilesystemTenancyBootstrapper remains disabled - storage isolation
-        // (R16) is Phase 12, explicitly out of scope for TASK-ARCH-004.
-        // Stancl\Tenancy\Bootstrappers\FilesystemTenancyBootstrapper::class,
+        /**
+         * TASK-ARCH-005 (RISK_REGISTER.md R16): enabled. Remaps the ROOT of every
+         * disk listed in 'filesystem.disks' below to a tenant-specific subtree
+         * for the duration of tenancy - Storage::put/get/delete/exists calls in
+         * unmodified Bagisto code (ProductImage, CategoryRepository,
+         * CustomerRepository, RMAImageRepository, ThemeCustomizationRepository,
+         * TinyMCEController, ChannelRepository, DataTransfer, ...) all resolve
+         * through Storage::disk(...)/the default disk, so every one of them
+         * becomes tenant-isolated automatically. Confirmed by a full repo audit
+         * (TASK-ARCH-005): every one of these consumers stores a bare relative
+         * path like `product/{id}/{file}` with NO store/tenant segment - under
+         * database-per-tenant, numeric IDs are LOCAL to each tenant's own
+         * database (fresh auto-increment), so the flat-path convention is only
+         * safe because the DISK ROOT itself is now tenant-unique, not because
+         * any path was changed. See docs/architecture/storage.md for the two
+         * narrow exceptions this alone does not cover (config('imagecache.paths')
+         * being frozen at boot time, and ThemeCustomizationRepository's
+         * hardcoded 'storage/' URL prefix) and how they were addressed without
+         * any packages/Webkul modification.
+         */
+        Stancl\Tenancy\Bootstrappers\FilesystemTenancyBootstrapper::class,
 
         Stancl\Tenancy\Bootstrappers\QueueTenancyBootstrapper::class,
         // Stancl\Tenancy\Bootstrappers\RedisTenancyBootstrapper::class, // Note: phpredis is needed
@@ -141,11 +159,22 @@ return [
     'filesystem' => [
         /**
          * Each disk listed in the 'disks' array will be suffixed by the suffix_base, followed by the tenant_id.
+         *
+         * TASK-ARCH-005: 'private' added - Webkul\DataTransfer (import/export
+         * source files, error reports, downloaded images) and
+         * Webkul\Product\Repositories\ProductDownloadableLinkRepository both
+         * write real tenant data to this disk (see the filesystem audit in
+         * docs/architecture/storage.md). Left with no root_override entry
+         * below, so it falls back to FilesystemTenancyBootstrapper's default
+         * (`{original_root}/{suffix}` = storage/app/private/tenant{id}) -
+         * still fully tenant-unique, just not nested under the
+         * already-suffixed storage_path() the way local/public are.
          */
         'suffix_base' => 'tenant',
         'disks' => [
             'local',
             'public',
+            'private',
             // 's3',
         ],
 

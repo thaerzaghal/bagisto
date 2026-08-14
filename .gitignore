@@ -38,6 +38,15 @@ package-lock.json
 skills-lock.json
 /storage/*.key
 /storage/dcc-data/
+
+# TASK-ARCH-005 (RISK_REGISTER.md R16): Stancl\Tenancy\Bootstrappers\
+# FilesystemTenancyBootstrapper (config/tenancy.php, 'suffix_storage_path' =>
+# true) creates a real, separate storage_path() subtree per tenant at runtime
+# - e.g. storage/tenant{tenant-id}/{app,framework,logs}/... - the exact same
+# kind of generated runtime content storage/framework/cache/data/.gitignore
+# etc. already exclude for the central app, just not a path stock Laravel's
+# own .gitignore anticipates. Never commit tenant runtime storage.
+/storage/tenant*/
 /test-results
 /vendor
 yarn.lock

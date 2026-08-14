@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
+use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
 use Stancl\Tenancy\Middleware;
@@ -70,9 +71,20 @@ class TenancyServiceProvider extends ServiceProvider
             ],
 
             Events\BootstrappingTenancy::class => [],
-            Events\TenancyBootstrapped::class => [],
+
+            // TASK-ARCH-005 (R16): fires after every configured bootstrapper -
+            // including FilesystemTenancyBootstrapper - has run, so
+            // storage_path()/public_path() already reflect this tenant. See
+            // Platform\Tenancy\Listeners\RetargetImageCachePaths for why this
+            // is needed at all.
+            Events\TenancyBootstrapped::class => [
+                [RetargetImageCachePaths::class, 'bootstrapped'],
+            ],
+
             Events\RevertingToCentralContext::class => [],
-            Events\RevertedToCentralContext::class => [],
+            Events\RevertedToCentralContext::class => [
+                [RetargetImageCachePaths::class, 'reverted'],
+            ],
 
             // Resource syncing
             Events\SyncedResourceSaved::class => [
@@ -91,6 +103,7 @@ class TenancyServiceProvider extends ServiceProvider
     {
         $this->bootEvents();
         $this->mapRoutes();
+        $this->attachTenancyToImageCacheRoute();
         $this->makeTenancyMiddlewareHighestPriority();
         $this->registerCommands();
 
@@ -132,6 +145,72 @@ class TenancyServiceProvider extends ServiceProvider
                 Route::namespace(static::$controllerNamespace)
                     ->group(base_path('routes/tenant.php'));
             }
+        });
+    }
+
+    /**
+     * TASK-ARCH-005 finalization (RISK_REGISTER.md R25): Webkul\ImageCache\
+     * Providers\ImageCacheServiceProvider::bootImageCache() registers its
+     * `cache/{template}/{filename}` route directly on the router
+     * ($this->app['router']->get(...)), from inside that provider's own
+     * boot() method, entirely outside routes/web.php and outside any
+     * Route::group() - confirmed live via route-object inspection during
+     * TASK-ARCH-005 (its ->middleware() is an empty array). This app's
+     * tenant resolution is only prepended to the 'web' middleware GROUP
+     * (bootstrap/app.php), not appended globally, so that route never runs
+     * it, for any Host header, central or tenant.
+     *
+     * The fix deliberately does NOT touch packages/Webkul/ImageCache (the
+     * one-line change of adding ->middleware() to that route registration
+     * would be trivial, but is still a Bagisto core file, and this task's
+     * rule is zero exceptions regardless of size) and deliberately does NOT
+     * make tenant resolution middleware globally applied (which would also
+     * silently change behavior for /up and any other package that
+     * registers routes the same direct-router way ImageCache does - a much
+     * larger, unaudited blast radius than this one route needs).
+     *
+     * Instead: find the already-registered 'imagecache' named route
+     * (Illuminate\Routing\Route objects support ->middleware() being called
+     * AFTER registration - this is a fully supported, standard Laravel
+     * mechanism, not a hack) and attach tenancy middleware to just that one
+     * route. This must run inside $this->app->booted(...), exactly like
+     * mapRoutes() above - Laravel boots every service provider's register()
+     * then every provider's boot() in registration order BEFORE firing
+     * 'booted' callbacks, so by the time this callback runs, EVERY
+     * provider's routes (regardless of registration order, including
+     * Webkul\ImageCache's, which boots after this provider) are guaranteed
+     * to already be registered. Running this directly in boot() instead
+     * (without the booted() wrapper) would silently no-op, since the
+     * ImageCache route would not exist yet at that point.
+     *
+     * PreventAccessFromCentralDomains is included deliberately: ImageCache
+     * serves tenant-owned media (product/category/theme images), and no
+     * real central/platform route consumes this endpoint today (per
+     * docs/architecture/domain-routing.md, no real platform UI exists yet)
+     * - so there is no known legitimate central use case to preserve. The
+     * one exception is the 'logo' template (fetches Bagisto's own remote
+     * logo over HTTP, touches no tenant storage at all) - if a future
+     * central platform admin UI needs that specific template, this
+     * decision should be revisited then, not preemptively worked around
+     * now for a use case that doesn't exist yet.
+     */
+    protected function attachTenancyToImageCacheRoute(): void
+    {
+        $this->app->booted(function () {
+            $route = $this->app['router']->getRoutes()->getByName('imagecache');
+
+            if (! $route) {
+                // Webkul\ImageCache not installed, or its route name/config
+                // changed - nothing to attach to. Fail open to "not
+                // tenant-aware" rather than throwing, since this is a
+                // best-effort integration with a package we don't own.
+                return;
+            }
+
+            $route->middleware([
+                Middleware\PreventAccessFromCentralDomains::class,
+                Middleware\InitializeTenancyByDomain::class,
+            ]);
         });
     }
 
