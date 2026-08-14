@@ -1,7 +1,10 @@
 @extends('platform::layouts.app', ['title' => 'Plans'])
 
 @section('content')
-    <h1>Plans</h1>
+    <p style="display: flex; justify-content: space-between; align-items: center;">
+        <h1 style="margin: 0;">Plans</h1>
+        <a href="{{ route('platform.plans.create') }}"><button type="button">Create Plan</button></a>
+    </p>
 
     <table>
         <thead>
@@ -16,7 +19,7 @@
         <tbody>
             @forelse ($plans as $plan)
                 <tr>
-                    <td>{{ $plan->code }}</td>
+                    <td><a href="{{ route('platform.plans.show', $plan) }}">{{ $plan->code }}</a></td>
                     <td>{{ $plan->name }}</td>
                     <td>{{ $plan->is_active ? 'Yes' : 'No' }}</td>
                     <td>{{ $plan->sort_order }}</td>

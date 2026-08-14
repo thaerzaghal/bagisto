@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Platform\Plans\Models\Plan;
+use Platform\Plans\Services\TenantPlanAssignment;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use RuntimeException;
@@ -214,6 +215,24 @@ class TenantProvisioner
      * Platform\Plans\Console\Commands\SeedPlans, which must be run once
      * per environment before any tenant is provisioned.
      *
+     * TASK-ARCH-015: also fails loudly if the configured default plan
+     * exists but has been deactivated via Platform Admin - a deactivated
+     * plan means "not available for new/manual assignment" (see
+     * docs/architecture/feature-limits.md, "Plan deactivation semantics"),
+     * and provisioning a brand-new tenant onto it is exactly that: a NEW
+     * assignment, not an already-existing tenant continuing to use a plan
+     * that was deactivated out from under them (which remains allowed and
+     * unaffected - see Platform\Plans\Services\TenantPlanAssignment's own
+     * docblock). The actual "is this plan assignable" check itself lives
+     * once, in TenantPlanAssignment::assign() - reused here rather than
+     * duplicated, so provisioning-time and platform-admin-time plan
+     * assignment can never silently disagree about what "assignable"
+     * means. This method's own try/catch in provision() (see that method)
+     * already marks the tenant FAILED with last_error on ANY Throwable, so
+     * InactivePlanAssignmentException propagating from here fails
+     * provisioning cleanly by construction, with no separate handling
+     * needed.
+     *
      * DEPENDENCY-DIRECTION NOTE: this is the one deliberate exception to
      * Platform\Plans depending on Platform\Tenancy (never the reverse) -
      * see DECISION_LOG.md. Plan assignment is fundamentally a
@@ -237,6 +256,6 @@ class TenantProvisioner
             );
         }
 
-        $tenant->forceFill(['plan_id' => $plan->id])->save();
+        app(TenantPlanAssignment::class)->assign($tenant, $plan);
     }
 }

@@ -119,7 +119,17 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
 | POST   | `/platform/tenants/{tenant}/migrate-pending` | `platform.tenants.migrate-pending` | `platform` |
 | POST   | `/platform/tenants/{tenant}/suspend`    | `platform.tenants.suspend`        | `platform` |
 | POST   | `/platform/tenants/{tenant}/reactivate` | `platform.tenants.reactivate`     | `platform` |
+| POST   | `/platform/tenants/{tenant}/change-plan` | `platform.tenants.change-plan`   | `platform` |
 | GET    | `/platform/plans`                       | `platform.plans.index`            | `platform` |
+| GET    | `/platform/plans/create`                | `platform.plans.create`           | `platform` |
+| POST   | `/platform/plans`                       | `platform.plans.store`            | `platform` |
+| GET    | `/platform/plans/{plan}`                | `platform.plans.show`             | `platform` |
+| PATCH  | `/platform/plans/{plan}`                | `platform.plans.update`           | `platform` |
+| POST   | `/platform/plans/{plan}/activate`       | `platform.plans.activate`         | `platform` |
+| POST   | `/platform/plans/{plan}/deactivate`     | `platform.plans.deactivate`       | `platform` |
+| POST   | `/platform/plans/{plan}/features`       | `platform.plans.features.store`   | `platform` |
+| PATCH  | `/platform/plans/{plan}/features/{feature}` | `platform.plans.features.update` | `platform` |
+| DELETE | `/platform/plans/{plan}/features/{feature}` | `platform.plans.features.destroy` | `platform` |
 
 ## Pages
 
@@ -130,17 +140,23 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
 - **Tenant list**: id, status, domain(s), current plan name, last error,
   created date — from `Tenant::with('domains')` plus a batched `Plan::
   whereIn('id', ...)` lookup. No tenant commerce database is queried.
-- **Tenant detail**: the same fields plus updated timestamp. No
-  subscription/billing section (out of scope, no such data exists yet).
+- **Tenant detail**: the same fields plus updated timestamp, plus (since
+  TASK-ARCH-015) a "Change Plan" form offering every currently ACTIVE plan
+  plus the tenant's own current plan even if it has since been
+  deactivated. No subscription/billing section (out of scope, no such
+  data exists yet).
 - **Plan list**: code, name, active flag, sort order, configured feature
-  count (`Plan::withCount('features')`). No pricing/billing fields —
-  `plans`/`plan_features` don't have any yet (TASK-ARCH-008 deliberately
-  didn't add them).
+  count (`Plan::withCount('features')`), each code linking to its detail
+  page (TASK-ARCH-015). No pricing/billing fields — `plans`/`plan_features`
+  don't have any (TASK-ARCH-008 deliberately didn't add them, TASK-ARCH-015
+  deliberately didn't either).
+- **Plan create/detail** (TASK-ARCH-015): create form (code/name/
+  description/sort_order/active); detail page combines an edit form
+  (name/description/sort_order — `code` is displayed but disabled, see
+  "Plan code policy" below) with the plan's feature list (add/edit/remove,
+  scoped to the known `FeatureCode` enum) and activate/deactivate actions.
 
-## Actions (deliberately minimal)
-
-Per the task brief, only non-destructive, already-idempotent operations
-this task did not invent:
+## Actions
 
 - **Provision / retry** (`platform.tenants.provision`) — calls the
   existing `TenantProvisioner::provision()` (TASK-ARCH-002), guarded by
@@ -161,11 +177,24 @@ this task did not invent:
   docs/architecture/provisioning.md "Suspension and reactivation" for the
   full lifecycle design and docs/architecture/domain-routing.md for how
   enforcement actually rejects a suspended tenant's requests.
+- **Change Plan** (`platform.tenants.change-plan`, TASK-ARCH-015) — calls
+  `Platform\Plans\Services\TenantPlanAssignment::assign()`; only an
+  ACTIVE plan may be selected in the dropdown (an inactive plan is
+  rejected server-side too, not just hidden from the UI). Immediate
+  effect on the next enforcement check - see
+  docs/architecture/feature-limits.md "Plan management".
+- **Create / edit / activate / deactivate a plan, add / edit / remove a
+  plan feature** (TASK-ARCH-015) — see docs/architecture/feature-limits.md
+  "Plan management" for the full CRUD design, plan code immutability
+  policy, deactivation semantics, and duplicate-feature/type validation.
 
-Still no delete — deletion requires a fully-defined backup/export
-lifecycle this task does not build (provisioning.md defines `Deleting`/
-`Deleted` states, but nothing in the codebase transitions a tenant into
-them yet).
+Still no delete for either tenants or plans — tenant deletion requires a
+fully-defined backup/export lifecycle this task does not build
+(provisioning.md defines `Deleting`/`Deleted` states, but nothing in the
+codebase transitions a tenant into them yet); plan deletion is
+deliberately never offered — deactivation is the only lifecycle mechanism
+for a plan (see docs/architecture/feature-limits.md "Plan deactivation
+semantics").
 
 ## ACL / authorization
 
@@ -214,9 +243,9 @@ R35).
 - **RBAC**: a real platform-role/permission system once more than one
   platform admin persona exists (e.g. "billing viewer" vs "full admin").
   Out of scope here per instruction.
-- **Tenant lifecycle actions**: suspend/reactivate/delete, once that
-  state machine is actually implemented (see provisioning.md's state
-  diagram) — currently only `Ready`/`Pending`/`Provisioning`/`Failed` are
-  ever reached by any code path.
+- **Tenant deletion**: suspend/reactivate shipped in TASK-ARCH-013;
+  deletion still requires a fully-defined backup/export lifecycle this
+  engagement has not built — `Deleting`/`Deleted` remain unreachable
+  states (see provisioning.md's state diagram).
 - **Subscriptions/billing**: explicitly out of scope for this task and
   the whole engagement so far (Phase 10/11, still unstarted).

@@ -10,7 +10,7 @@
             <tr><th>Tenant ID</th><td>{{ $tenant->getTenantKey() }}</td></tr>
             <tr><th>Status</th><td><span class="status status-{{ $tenant->status->value }}">{{ $tenant->status->value }}</span></td></tr>
             <tr><th>Domains</th><td>{{ $tenant->domains->pluck('domain')->join(', ') ?: '—' }}</td></tr>
-            <tr><th>Plan</th><td>{{ $plan?->name ?? '—' }}</td></tr>
+            <tr><th>Plan</th><td>{{ $plan?->name ?? '—' }}{{ $plan && ! $plan->is_active ? ' (inactive)' : '' }}</td></tr>
             <tr><th>Last error</th><td>{{ $tenant->last_error ?: '—' }}</td></tr>
             <tr><th>Created at</th><td>{{ $tenant->created_at }}</td></tr>
             <tr><th>Updated at</th><td>{{ $tenant->updated_at }}</td></tr>
@@ -42,4 +42,22 @@
             </form>
         @endif
     </p>
+
+    <div class="card" style="margin-top: 1.5rem; max-width: 420px;">
+        <h2 style="margin-top: 0;">Change Plan</h2>
+
+        <form method="POST" action="{{ route('platform.tenants.change-plan', $tenant->getTenantKey()) }}">
+            @csrf
+
+            <select name="plan_id">
+                @foreach ($assignablePlans as $assignable)
+                    <option value="{{ $assignable->id }}" {{ $plan?->id === $assignable->id ? 'selected' : '' }}>
+                        {{ $assignable->name }}{{ ! $assignable->is_active ? ' (inactive - current plan)' : '' }}
+                    </option>
+                @endforeach
+            </select>
+
+            <button type="submit">Change Plan</button>
+        </form>
+    </div>
 @endsection
