@@ -27,6 +27,7 @@
  */
 
 use Illuminate\Support\Facades\DB;
+use Platform\Plans\Models\Plan;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Services\TenantProvisioner;
@@ -123,6 +124,19 @@ function ensureRoutingFixturesProvisioned(): void
         }
         $provisioner->provision($tenantB);
         $tenantB->run(fn () => createVisibleProduct('PROD-B', 'Product B'));
+    }
+
+    // TASK-ARCH-012: see TenantCacheIsolationTest.php's identical comment -
+    // tenant-a/tenant-b are shared across several files and accumulate
+    // products across this whole engagement's test history; pinned to the
+    // unlimited 'pro' plan so real product-limit enforcement never blocks
+    // routing tests that have nothing to do with plan limits.
+    $proPlan = Plan::where('code', 'pro')->firstOrFail();
+    if ($tenantA->plan_id !== $proPlan->id) {
+        $tenantA->forceFill(['plan_id' => $proPlan->id])->save();
+    }
+    if ($tenantB->plan_id !== $proPlan->id) {
+        $tenantB->forceFill(['plan_id' => $proPlan->id])->save();
     }
 }
 

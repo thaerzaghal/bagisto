@@ -15,6 +15,6 @@ use RuntimeException;
  * default plan as a provisioning step) or was created bypassing
  * TenantProvisioner entirely.
  */
-class NoPlanAssignedException extends RuntimeException
+class NoPlanAssignedException extends RuntimeException implements EntitlementException
 {
 }

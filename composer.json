@@ -70,6 +70,7 @@
             "Database\\Factories\\": "database/factories/",
             "Database\\Seeders\\": "database/seeders/",
             "Platform\\Admin\\": "packages/Platform/Admin/src",
+            "Platform\\Enforcement\\": "packages/Platform/Enforcement/src",
             "Platform\\Plans\\": "packages/Platform/Plans/src",
             "Platform\\Tenancy\\": "packages/Platform/Tenancy/src",
             "Webkul\\Admin\\": "packages/Webkul/Admin/src",

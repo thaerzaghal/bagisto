@@ -23,6 +23,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
+use Platform\Plans\Models\Plan;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Services\TenantProvisioner;
@@ -77,6 +78,21 @@ function ensureStorageTestFixtures(): array
             $tenantB->domains()->create(['domain' => 'tenant-b.localhost']);
         }
         $provisioner->provision($tenantB);
+    }
+
+    // TASK-ARCH-012: see TenantCacheIsolationTest.php's identical comment -
+    // tenant-a/tenant-b are shared across several files and accumulate
+    // products across this whole engagement's test history (this file's
+    // own product-image-upload test creates a fresh product every run);
+    // pinned to the unlimited 'pro' plan so real product-limit enforcement
+    // never blocks storage-isolation tests that have nothing to do with
+    // plan limits.
+    $proPlan = Plan::where('code', 'pro')->firstOrFail();
+    if ($tenantA->plan_id !== $proPlan->id) {
+        $tenantA->forceFill(['plan_id' => $proPlan->id])->save();
+    }
+    if ($tenantB->plan_id !== $proPlan->id) {
+        $tenantB->forceFill(['plan_id' => $proPlan->id])->save();
     }
 
     return [$tenantA, $tenantB];

@@ -14,6 +14,6 @@ use RuntimeException;
  * so it fails loud rather than silently coercing (e.g. a numeric limit of
  * 0 is NOT the same statement as a boolean feature being false).
  */
-class FeatureTypeMismatchException extends RuntimeException
+class FeatureTypeMismatchException extends RuntimeException implements EntitlementException
 {
 }

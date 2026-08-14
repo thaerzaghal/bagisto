@@ -13,6 +13,6 @@ use RuntimeException;
  * which would be indistinguishable from a genuinely-seeded, deliberately
  * restrictive value.
  */
-class FeatureNotConfiguredException extends RuntimeException
+class FeatureNotConfiguredException extends RuntimeException implements EntitlementException
 {
 }

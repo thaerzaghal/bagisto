@@ -2,6 +2,7 @@
 
 use App\Providers\AppServiceProvider;
 use Platform\Admin\Providers\PlatformAdminServiceProvider;
+use Platform\Enforcement\Providers\EnforcementServiceProvider;
 use Platform\Plans\Providers\PlansServiceProvider;
 use Platform\Tenancy\Providers\TenancyServiceProvider;
 use Webkul\Admin\Providers\AdminServiceProvider;
@@ -80,6 +81,18 @@ return [
      * docs/architecture/platform-admin.md.
      */
     PlatformAdminServiceProvider::class,
+
+    /**
+     * TASK-ARCH-012: wires Bagisto's real product-creation extension
+     * point (Webkul\Product\Models\Product's Eloquent `creating` event)
+     * to Platform\Plans' feature-agnostic TenantLimits enforcement
+     * engine. Depends on Platform\Plans (registered above) AND
+     * Webkul\Product (registered below, though load order does not
+     * matter here - Eloquent model-event registration has no dependency
+     * on the owning package's provider having booted first). See
+     * docs/architecture/feature-limits.md "Enforcement boundary".
+     */
+    EnforcementServiceProvider::class,
 
     /**
      * Webkul's service providers.

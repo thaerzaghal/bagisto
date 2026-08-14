@@ -15,6 +15,7 @@
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Platform\Plans\Models\Plan;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Services\TenantProvisioner;
@@ -78,6 +79,29 @@ function ensureCacheTestFixtures(): array
             $p = $repo->create(['type' => 'simple', 'attribute_family_id' => 1, 'sku' => 'PROD-B']);
             $repo->update(['status' => 1, 'visible_individually' => 1, 'name' => 'Product B', 'url_key' => 'product-b'], $p->id);
         });
+    }
+
+    // TASK-ARCH-012: tenant-a/tenant-b are shared, legacy-named fixtures
+    // (predating the later "one dedicated tenant per test file" convention)
+    // reused across TenantCacheIsolationTest/TenantDomainRoutingTest/
+    // TenantStorageIsolationTest/TenantImageCacheIsolationTest/
+    // TenantProvisioningTest, provisioned on the default 'free' plan
+    // (products.limit=10) - product-limit enforcement now real means their
+    // accumulated product count across this whole engagement's many test
+    // runs (nothing here tests limits, so nothing ever cleaned this up)
+    // can exceed that unrelated business-rule cap and start blocking
+    // product creation these tests have nothing to do with. Pinned to the
+    // 'pro' (unlimited) plan explicitly and idempotently - matching the
+    // established `ensureAdminPlanPageTestFixtures()` idiom
+    // (TenantAdminPlanPageTest.php) - so cache-isolation tests never
+    // depend on an unrelated plan's arbitrary limit, on a fresh
+    // environment or an already-bloated one alike.
+    $proPlan = Plan::where('code', 'pro')->firstOrFail();
+    if ($tenantA->plan_id !== $proPlan->id) {
+        $tenantA->forceFill(['plan_id' => $proPlan->id])->save();
+    }
+    if ($tenantB->plan_id !== $proPlan->id) {
+        $tenantB->forceFill(['plan_id' => $proPlan->id])->save();
     }
 
     return [$tenantA, $tenantB];
