@@ -29,5 +29,17 @@
             @csrf
             <button type="submit">Run pending migrations</button>
         </form>
+
+        @if ($tenant->status === \Platform\Tenancy\Enums\TenantStatus::Ready)
+            <form class="inline" method="POST" action="{{ route('platform.tenants.suspend', $tenant->getTenantKey()) }}" onsubmit="return confirm('Suspend this tenant? Their storefront, admin, and API will become inaccessible until reactivated.');">
+                @csrf
+                <button type="submit">Suspend</button>
+            </form>
+        @elseif ($tenant->status === \Platform\Tenancy\Enums\TenantStatus::Suspended)
+            <form class="inline" method="POST" action="{{ route('platform.tenants.reactivate', $tenant->getTenantKey()) }}" onsubmit="return confirm('Reactivate this tenant? Their storefront, admin, and API will become accessible again immediately.');">
+                @csrf
+                <button type="submit">Reactivate</button>
+            </form>
+        @endif
     </p>
 @endsection

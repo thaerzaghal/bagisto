@@ -117,6 +117,8 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
 | GET    | `/platform/tenants/{tenant}`            | `platform.tenants.show`           | `platform` |
 | POST   | `/platform/tenants/{tenant}/provision`  | `platform.tenants.provision`      | `platform` |
 | POST   | `/platform/tenants/{tenant}/migrate-pending` | `platform.tenants.migrate-pending` | `platform` |
+| POST   | `/platform/tenants/{tenant}/suspend`    | `platform.tenants.suspend`        | `platform` |
+| POST   | `/platform/tenants/{tenant}/reactivate` | `platform.tenants.reactivate`     | `platform` |
 | GET    | `/platform/plans`                       | `platform.plans.index`            | `platform` |
 
 ## Pages
@@ -148,11 +150,22 @@ this task did not invent:
 - **Run pending migrations** (`platform.tenants.migrate-pending`) — calls
   the existing `TenantProvisioner::remigrate()` (TASK-ARCH-010/R33),
   safe on any tenant, any status, any number of times.
+- **Suspend** (`platform.tenants.suspend`, TASK-ARCH-013) / **Reactivate**
+  (`platform.tenants.reactivate`) — calls `Platform\Tenancy\Services\
+  TenantLifecycle::suspend()`/`reactivate()`; visible only for a Ready
+  (Suspend) or Suspended (Reactivate) tenant respectively, requires an
+  explicit JS `confirm()` before submitting (state-changing POST, real
+  CSRF token via the existing `platform` middleware group - no GET-based
+  mutation). An invalid attempt (e.g. a stale page double-submit) fails
+  cleanly with a flashed error, not a 500. See
+  docs/architecture/provisioning.md "Suspension and reactivation" for the
+  full lifecycle design and docs/architecture/domain-routing.md for how
+  enforcement actually rejects a suspended tenant's requests.
 
-No suspend/reactivate/delete — those require a fully-defined lifecycle
-this task does not build (the state machine in provisioning.md defines
-`Suspended`/`Deleting`/`Deleted` states, but nothing in the codebase
-transitions a tenant into them yet).
+Still no delete — deletion requires a fully-defined backup/export
+lifecycle this task does not build (provisioning.md defines `Deleting`/
+`Deleted` states, but nothing in the codebase transitions a tenant into
+them yet).
 
 ## ACL / authorization
 

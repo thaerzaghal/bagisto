@@ -39,6 +39,8 @@ Route::middleware([EnsureCentralDomain::class, 'platform'])
             Route::get('tenants/{tenant}', [TenantController::class, 'show'])->name('tenants.show');
             Route::post('tenants/{tenant}/provision', [TenantController::class, 'provision'])->name('tenants.provision');
             Route::post('tenants/{tenant}/migrate-pending', [TenantController::class, 'migratePending'])->name('tenants.migrate-pending');
+            Route::post('tenants/{tenant}/suspend', [TenantController::class, 'suspend'])->name('tenants.suspend');
+            Route::post('tenants/{tenant}/reactivate', [TenantController::class, 'reactivate'])->name('tenants.reactivate');
 
             Route::get('plans', [PlanController::class, 'index'])->name('plans.index');
         });

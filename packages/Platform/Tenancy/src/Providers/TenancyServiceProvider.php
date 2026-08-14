@@ -14,6 +14,7 @@ use Platform\Tenancy\Console\Commands\MigrateCentral;
 use Platform\Tenancy\Console\Commands\MigratePendingTenants;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
+use Platform\Tenancy\Http\Middleware\BlockSuspendedTenants;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
 use Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema;
 use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
@@ -142,6 +143,10 @@ class TenancyServiceProvider extends ServiceProvider
         $this->makeTenancyMiddlewareHighestPriority();
         $this->registerCommands();
 
+        // TASK-ARCH-013: the 'tenancy::suspended' view BlockSuspendedTenants
+        // renders for a suspended tenant's non-JSON requests.
+        $this->loadViewsFrom(__DIR__.'/../Resources/views', 'tenancy');
+
         // Only the root database/migrations/tenant folder is registered here -
         // never packages/Platform/Tenancy/src/Database/Migrations (this package
         // has none yet, and never will for anything central-only; see the
@@ -255,6 +260,13 @@ class TenancyServiceProvider extends ServiceProvider
     protected function makeTenancyMiddlewareHighestPriority()
     {
         $tenancyMiddleware = [
+            // TASK-ARCH-013: must run before EVERYTHING below it, including
+            // PreventAccessFromCentralDomains - it makes its own suspension
+            // decision from a fresh central resolve before any tenancy
+            // middleware (or the tenant DB connection swap they trigger)
+            // ever runs. See that class's own docblock for the full flow.
+            BlockSuspendedTenants::class,
+
             // Even higher priority than the initialization middleware
             Middleware\PreventAccessFromCentralDomains::class,
 

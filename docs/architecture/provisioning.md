@@ -46,8 +46,23 @@ The gap: a handful of stock Laravel scaffolding tables also live in that root di
 
 **General lesson for any future "does this stock Laravel table need to be tenant-scoped" question**: check whether the table is written to during an ordinary request under this project's REAL `.env` settings (not the test suite's overrides) - `array`/`sync`-style test defaults mask an entire class of bug that only a real, production-representative configuration exposes.
 
-## Suspension and deletion
+## Suspension and reactivation — IMPLEMENTED (TASK-ARCH-013)
 
-`SUSPENDED`: tenant database and data are untouched; the domain-routing middleware refuses to resolve the tenant to a working store (shows a suspension page instead) — enforced centrally, before any tenant DB connection is even established, so suspension cannot be bypassed by a request that skips some later check (see [security.md](security.md)).
+`SUSPENDED`: tenant database and data are untouched; a dedicated middleware refuses to resolve the tenant to a working store (returns a suspension response instead) — enforced centrally, before any tenant DB connection is even established, so suspension cannot be bypassed by a request that skips some later check (see [security.md](security.md) and [domain-routing.md](domain-routing.md) for the exact request flow).
 
-`DELETING` → `DELETED`: drops the tenant database after (a) an explicit confirmation step and (b) optionally an export/backup step, per the brief's future-scale requirement for tenant export. The exact backup mechanism is out of scope for Phase 0 architecture and should be designed alongside Phase 18 (production deployment) once actual backup infrastructure is chosen.
+**Lifecycle service**: `Platform\Tenancy\Services\TenantLifecycle` owns the only two transitions built so far:
+
+```
+Ready      -> Suspended    (suspend())
+Suspended  -> Ready        (reactivate())
+```
+
+Both are plain, explicit methods — no controller ever sets `$tenant->status` directly. An invalid transition (suspending a non-Ready tenant, reactivating a non-Suspended one) throws `Platform\Tenancy\Exceptions\InvalidTenantTransitionException` rather than silently no-op-ing or overwriting state. Both methods are pure central-`tenants`-table metadata writes — neither ever calls `$tenant->run()` or touches the tenant's own database, which is exactly what makes reactivation instantaneous and safe: there is nothing to reprovision, reseed, or re-migrate, because suspension never modified the tenant database in the first place. Proven live: a product created before suspension is byte-for-byte identical (same id, same `created_at`) after reactivation, and the tenant's own `migrations` table is unchanged.
+
+**Reusable outside the HTTP layer by design** (task requirement, not yet exercised in anger): `TenantLifecycle` takes no request/session dependency, so a future billing-driven automation can call `TenantLifecycle::suspend()`/`reactivate()` directly (e.g. "subscription delinquent → suspend()", "payment recovered → reactivate()") with zero changes to this class — see DECISION_LOG.md for the specific record. No such automation exists yet; only `Platform\Admin\Http\Controllers\TenantController::suspend()/reactivate()` calls it today, gated by the same `auth:platform` guard every other Platform Admin action uses.
+
+**Interaction with the provisioning state machine**: `Suspended` was never provisionable (`TenantStatus::isProvisionable()` only ever returned true for `Pending`/`Provisioning`/`Failed` — confirmed unchanged by this task) and Platform Admin's own Provision/Retry button already conditions on that same check, so a Suspended tenant correctly never shows a Provision button and `TenantProvisioner::provision()` correctly refuses to run against one. `TenantProvisioner::remigrate()` (`platform:tenants:migrate-pending`) deliberately remains callable against a Suspended tenant regardless (its own established contract: "safe to run against any tenant, any number of times, regardless of status", TASK-ARCH-010/R33) — this is why suspension enforcement had to be a `web`-group HTTP middleware rather than a listener on `Stancl\Tenancy\Events\InitializingTenancy` (which fires identically for both a real inbound request AND `remigrate()`'s own internal `$tenant->run()` call); see `Platform\Tenancy\Http\Middleware\BlockSuspendedTenants`'s own docblock for the full reasoning.
+
+## Deletion — NOT YET IMPLEMENTED
+
+`DELETING` → `DELETED`: drops the tenant database after (a) an explicit confirmation step and (b) optionally an export/backup step, per the brief's future-scale requirement for tenant export. The exact backup mechanism is out of scope for Phase 0 architecture and should be designed alongside Phase 18 (production deployment) once actual backup infrastructure is chosen. TASK-ARCH-013 explicitly excludes this — deletion has real, unresolved data-loss/backup-strategy questions this task does not answer.

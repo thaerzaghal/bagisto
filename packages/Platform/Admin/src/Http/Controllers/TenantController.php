@@ -7,7 +7,9 @@ namespace Platform\Admin\Http\Controllers;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\View\View;
 use Platform\Plans\Models\Plan;
+use Platform\Tenancy\Exceptions\InvalidTenantTransitionException;
 use Platform\Tenancy\Models\Tenant;
+use Platform\Tenancy\Services\TenantLifecycle;
 use Platform\Tenancy\Services\TenantProvisioner;
 use Throwable;
 
@@ -20,12 +22,14 @@ use Throwable;
  * (products, orders, ...) is simply not part of this page at all.
  *
  * Actions are deliberately minimal per the task brief (item 11): view,
- * and two non-destructive, already-idempotent operations this task does
- * not invent - `TenantProvisioner::provision()` (safe retry of a
- * Pending/Provisioning/Failed tenant, TASK-ARCH-002) and
- * `TenantProvisioner::remigrate()` (safe on any tenant, any number of
- * times, TASK-ARCH-010/R33). No suspend/reactivate/delete - those require
- * a fully-defined lifecycle this task does not build.
+ * two non-destructive, already-idempotent operations - `TenantProvisioner::
+ * provision()` (safe retry of a Pending/Provisioning/Failed tenant,
+ * TASK-ARCH-002) and `TenantProvisioner::remigrate()` (safe on any tenant,
+ * any number of times, TASK-ARCH-010/R33) - and, since TASK-ARCH-013,
+ * suspend()/reactivate() via `Platform\Tenancy\Services\TenantLifecycle`
+ * (Ready<->Suspended only; the controller itself never mutates
+ * `$tenant->status` directly). Still no delete - deletion has its own
+ * unresolved backup/export design questions and remains out of scope.
  */
 class TenantController
 {
@@ -83,5 +87,27 @@ class TenantController
         }
 
         return back()->with('status', "Pending migrations applied for tenant [{$tenant->getTenantKey()}].");
+    }
+
+    public function suspend(Tenant $tenant, TenantLifecycle $lifecycle): RedirectResponse
+    {
+        try {
+            $lifecycle->suspend($tenant);
+        } catch (InvalidTenantTransitionException $e) {
+            return back()->withErrors(['tenant' => $e->getMessage()]);
+        }
+
+        return back()->with('status', "Tenant [{$tenant->getTenantKey()}] suspended.");
+    }
+
+    public function reactivate(Tenant $tenant, TenantLifecycle $lifecycle): RedirectResponse
+    {
+        try {
+            $lifecycle->reactivate($tenant);
+        } catch (InvalidTenantTransitionException $e) {
+            return back()->withErrors(['tenant' => $e->getMessage()]);
+        }
+
+        return back()->with('status', "Tenant [{$tenant->getTenantKey()}] reactivated.");
     }
 }

@@ -37,6 +37,37 @@ Incoming request
       request proceeds into normal Bagisto routing (admin/shop) against the tenant's own database
 ```
 
+## TASK-ARCH-013: the `Suspended` branch, implemented and proven
+
+The sketch above ("if match and tenant.status != 'ready': show suspension page") is now real for `Suspended` specifically (`Pending`/`Provisioning`/`Failed` remain unaddressed - out of this task's scope, see below).
+
+**Actual request flow**, confirmed live:
+
+```
+Host
+  -> Platform\Tenancy\Http\Middleware\BlockSuspendedTenants (NEW, 'web' group, highest priority -
+     runs before EVERYTHING else, including PreventAccessFromCentralDomains)
+       -> Stancl\Tenancy\Resolvers\DomainTenantResolver::resolveWithoutCache($host)
+          [a plain central-only `tenants`/`domains` query - the SAME resolver class
+           Stancl\Tenancy\Middleware\InitializeTenancyByDomain itself uses a moment
+           later, reused rather than duplicated]
+       -> host doesn't resolve to any tenant -> pass through unchanged
+          (InitializeTenancyByDomain's own existing unknown-domain 404 still applies,
+           byte-for-byte - this middleware makes zero behavior change here)
+       -> resolves, tenant.status != Suspended -> pass through unchanged
+       -> resolves, tenant.status == Suspended -> 423 response, request stops HERE -
+          InitializeTenancyByDomain never runs, DatabaseTenancyBootstrapper never
+          runs, the tenant database connection is never opened
+  -> (only reached for a non-suspended, resolvable host) InitializeTenancyByDomain
+     runs normally, exactly as it always has
+```
+
+**Why a dedicated middleware, not a listener on the tenancy-initialization event** (the more "elegant"-looking option that turns out to be wrong): `Stancl\Tenancy\Events\InitializingTenancy` fires for every call to `Tenancy::initialize()`, including trusted, Platform-Admin-initiated internal calls like `platform.tenants.migrate-pending` (`TenantProvisioner::remigrate()`, which the task's own established contract requires to work "against any tenant, any number of times, regardless of status" - TASK-ARCH-010/R33). A listener there cannot tell a real inbound HTTP request apart from Platform Admin's own trusted backend code touching the same tenant - both call the identical method. `BlockSuspendedTenants`, scoped to the `web` HTTP middleware group only, naturally never runs for any internal `$tenant->run()` call (none of them pass through any HTTP middleware pipeline), so it can never block Platform Admin's own legitimate maintenance actions against a Suspended tenant.
+
+**Response semantics**: `423 Locked` (not 403/404/503 - see docs/architecture/security.md's "Suspended tenant access" section for the reasoning), HTML for a normal browser request (`tenancy::suspended`, a small Platform-owned view - no `packages/Webkul` view touched), structured JSON (`{"message": "..."}`) for any request that `wantsJson()` - covering Shop, Admin, and API requests uniformly, since all three run through the identical `web` middleware group.
+
+**Deliberately NOT extended to `Pending`/`Provisioning`/`Failed`**: those tenants already have a resolvable `domains` row (created at tenant-creation time, before provisioning even starts, per every established test fixture in this codebase) and currently resolve normally if their domain is hit directly - `DatabaseTenancyBootstrapper` does not check `status` at all today. This is a real, pre-existing gap the sketch above already anticipated ("tenant.status != 'ready'") but TASK-ARCH-013 does not fix it - out of this task's explicitly Ready<->Suspended-only scope. Noted here for whoever picks up the remaining lifecycle states later, not silently ignored.
+
 ## TASK-ARCH-003: implemented and proven — the actual wiring
 
 The flow diagram above described the intent; this section documents what was actually built and verified with real HTTP requests through real Bagisto routes (`tests/Feature/Platform/TenantDomainRoutingTest.php`, 7 tests, all passing).
