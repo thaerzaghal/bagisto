@@ -10,7 +10,9 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
+use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
+use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
@@ -79,13 +81,21 @@ class TenancyServiceProvider extends ServiceProvider
             // storage_path()/public_path() already reflect this tenant. See
             // Platform\Tenancy\Listeners\RetargetImageCachePaths for why this
             // is needed at all.
+            //
+            // TASK-ARCH-007: same event, retargets config('elasticsearch.
+            // index_prefix') per tenant - see Platform\Tenancy\Listeners\
+            // RetargetElasticsearchIndexPrefix for why (Webkul\Product's
+            // Elasticsearch index name has no tenant identifier in it
+            // otherwise).
             Events\TenancyBootstrapped::class => [
                 [RetargetImageCachePaths::class, 'bootstrapped'],
+                [RetargetElasticsearchIndexPrefix::class, 'bootstrapped'],
             ],
 
             Events\RevertingToCentralContext::class => [],
             Events\RevertedToCentralContext::class => [
                 [RetargetImageCachePaths::class, 'reverted'],
+                [RetargetElasticsearchIndexPrefix::class, 'reverted'],
             ],
 
             // Resource syncing
@@ -138,6 +148,7 @@ class TenancyServiceProvider extends ServiceProvider
             $this->commands([
                 ProvisionTenant::class,
                 MarkPlatformInstalled::class,
+                ReindexTenant::class,
             ]);
         }
     }
