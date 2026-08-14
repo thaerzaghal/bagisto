@@ -74,6 +74,30 @@ return Application::configure(basePath: dirname(__DIR__))
             InitializeTenancyByDomain::class,
         ]);
 
+        /**
+         * TASK-ARCH-011: the 'platform' middleware group for Platform Admin
+         * (packages/Platform/Admin) - central-only routes that must NEVER run
+         * InitializeTenancyByDomain (which, for the central domain host, would
+         * throw TenantCouldNotBeIdentifiedException exactly like any unknown
+         * host, since no tenant `domains` row is ever expected to exist for
+         * it - see docs/architecture/domain-routing.md's "Unresolved-domain
+         * handling"). Built from `getMiddlewareGroups()['web']` AFTER the
+         * prependToGroup() call above and the EncryptCookies replaceInGroup()
+         * above that, so it automatically tracks whatever the real 'web' group
+         * resolves to (session/csrf/cookie handling) minus only the one
+         * tenant-resolution entry - no separate, hand-maintained middleware
+         * list to drift out of sync with 'web' over time. Platform\Admin's own
+         * Platform\Admin\Http\Middleware\EnsureCentralDomain is the actual
+         * host-boundary enforcement (see that class); this group only ensures
+         * Platform Admin requests get ordinary session/CSRF/cookie handling
+         * against whatever the CURRENT default (central) DB connection is,
+         * without ever being able to trigger a tenant DB connection swap.
+         */
+        $middleware->group('platform', array_values(array_diff(
+            $middleware->getMiddlewareGroups()['web'],
+            [InitializeTenancyByDomain::class],
+        )));
+
         $middleware->validateCsrfTokens(except: [
             'stripe/*',
         ]);

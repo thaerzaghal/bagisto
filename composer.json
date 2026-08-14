@@ -69,6 +69,7 @@
             "App\\": "app/",
             "Database\\Factories\\": "database/factories/",
             "Database\\Seeders\\": "database/seeders/",
+            "Platform\\Admin\\": "packages/Platform/Admin/src",
             "Platform\\Plans\\": "packages/Platform/Plans/src",
             "Platform\\Tenancy\\": "packages/Platform/Tenancy/src",
             "Webkul\\Admin\\": "packages/Webkul/Admin/src",

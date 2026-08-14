@@ -1,5 +1,6 @@
 <?php
 
+use Platform\Admin\Models\PlatformUser;
 use Webkul\Customer\Models\Customer;
 use Webkul\User\Models\Admin;
 
@@ -48,6 +49,17 @@ return [
             'driver' => 'session',
             'provider' => 'admins',
         ],
+
+        /*
+         * TASK-ARCH-011: PLATFORM admin guard - completely separate from
+         * 'admin' (tenant-scoped Bagisto store staff) and 'customer'. See
+         * docs/architecture/platform-admin.md for the full boundary and
+         * why tenant admin identities are never reused here.
+         */
+        'platform' => [
+            'driver' => 'session',
+            'provider' => 'platform_admins',
+        ],
     ],
 
     /*
@@ -76,6 +88,11 @@ return [
         'admins' => [
             'driver' => 'eloquent',
             'model' => Admin::class,
+        ],
+
+        'platform_admins' => [
+            'driver' => 'eloquent',
+            'model' => PlatformUser::class,
         ],
     ],
 

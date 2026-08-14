@@ -1,6 +1,7 @@
 <?php
 
 use App\Providers\AppServiceProvider;
+use Platform\Admin\Providers\PlatformAdminServiceProvider;
 use Platform\Plans\Providers\PlansServiceProvider;
 use Platform\Tenancy\Providers\TenancyServiceProvider;
 use Webkul\Admin\Providers\AdminServiceProvider;
@@ -67,6 +68,18 @@ return [
      * (registers only a console command, no listeners/middleware/routes).
      */
     PlansServiceProvider::class,
+
+    /**
+     * TASK-ARCH-011: the CENTRAL Platform Admin area (tenants/plans/
+     * provisioning management for the SaaS business itself, NOT a tenant's
+     * Bagisto store admin) - depends on Platform\Tenancy and Platform\Plans
+     * (reads Tenant/Plan directly), so registered after both; registers its
+     * own 'platform' guard routes/views/command only, no listeners/
+     * middleware-group definitions of its own (those live in
+     * bootstrap/app.php, see the 'platform' group comment there). See
+     * docs/architecture/platform-admin.md.
+     */
+    PlatformAdminServiceProvider::class,
 
     /**
      * Webkul's service providers.
