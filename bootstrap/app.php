@@ -8,7 +8,7 @@ use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Foundation\Http\Middleware\PreventRequestsDuringMaintenance;
-use Platform\Tenancy\Http\Middleware\BlockSuspendedTenants;
+use Platform\Tenancy\Http\Middleware\TenantAccessGate;
 use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 use Stancl\Tenancy\Middleware\InitializeTenancyByDomain;
 use Webkul\Core\Http\Middleware\SecureHeaders;
@@ -100,20 +100,25 @@ return Application::configure(basePath: dirname(__DIR__))
         )));
 
         /**
-         * TASK-ARCH-013: prepended AFTER the 'platform' group is built above
-         * (deliberately - Platform Admin's own EnsureCentralDomain already
-         * owns its host boundary and must never attempt tenant resolution
-         * at all, see that group's own comment), so this only ever lands in
-         * 'web'. prependToGroup() always inserts at the very front of
-         * whatever is currently in the group, so this correctly runs BEFORE
-         * the InitializeTenancyByDomain prepended above, without needing to
-         * touch that earlier line. See Platform\Tenancy\Http\Middleware\
-         * BlockSuspendedTenants's own docblock for the full request flow
-         * and why this must be a distinct, earlier middleware rather than a
-         * listener on Stancl\Tenancy\Events\InitializingTenancy.
+         * TASK-ARCH-013/014: prepended AFTER the 'platform' group is built
+         * above (deliberately - Platform Admin's own EnsureCentralDomain
+         * already owns its host boundary and must never attempt tenant
+         * resolution at all, see that group's own comment), so this only
+         * ever lands in 'web'. prependToGroup() always inserts at the very
+         * front of whatever is currently in the group, so this correctly
+         * runs BEFORE the InitializeTenancyByDomain prepended above,
+         * without needing to touch that earlier line. TASK-ARCH-014
+         * generalized this from TASK-ARCH-013's Suspended-only
+         * BlockSuspendedTenants into TenantAccessGate, which rejects EVERY
+         * non-request-eligible tenant status (Pending/Provisioning/Failed/
+         * Deleting/Deleted with 503, Suspended with 423, fail-closed
+         * default for any unrecognized status) - see that class's own
+         * docblock for the full request flow and why this must be a
+         * distinct, earlier middleware rather than a listener on
+         * Stancl\Tenancy\Events\InitializingTenancy.
          */
         $middleware->prependToGroup('web', [
-            BlockSuspendedTenants::class,
+            TenantAccessGate::class,
         ]);
 
         $middleware->validateCsrfTokens(except: [

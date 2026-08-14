@@ -37,36 +37,41 @@ Incoming request
       request proceeds into normal Bagisto routing (admin/shop) against the tenant's own database
 ```
 
-## TASK-ARCH-013: the `Suspended` branch, implemented and proven
+## TASK-ARCH-014: the full lifecycle gate, implemented and proven
 
-The sketch above ("if match and tenant.status != 'ready': show suspension page") is now real for `Suspended` specifically (`Pending`/`Provisioning`/`Failed` remain unaddressed - out of this task's scope, see below).
+The sketch above ("if match and tenant.status != 'ready': show suspension page") is now fully real for every `TenantStatus` case. TASK-ARCH-013 first implemented this for `Suspended` only, via a dedicated `BlockSuspendedTenants` middleware; TASK-ARCH-014 generalized that class in place into `Platform\Tenancy\Http\Middleware\TenantAccessGate`, which now makes the complete, fail-closed readiness decision for every request - see [provisioning.md](provisioning.md)'s "Tenant lifecycle traffic matrix" for the full state-to-response table.
 
 **Actual request flow**, confirmed live:
 
 ```
 Host
-  -> Platform\Tenancy\Http\Middleware\BlockSuspendedTenants (NEW, 'web' group, highest priority -
+  -> Platform\Tenancy\Http\Middleware\TenantAccessGate ('web' group, highest priority -
      runs before EVERYTHING else, including PreventAccessFromCentralDomains)
        -> Stancl\Tenancy\Resolvers\DomainTenantResolver::resolveWithoutCache($host)
           [a plain central-only `tenants`/`domains` query - the SAME resolver class
            Stancl\Tenancy\Middleware\InitializeTenancyByDomain itself uses a moment
-           later, reused rather than duplicated]
+           later, reused rather than duplicated; resolution caching is off by default
+           in this app (DomainTenantResolver::$shouldCache is never overridden), so
+           there is no stale-status risk from a cached resolution here]
        -> host doesn't resolve to any tenant -> pass through unchanged
           (InitializeTenancyByDomain's own existing unknown-domain 404 still applies,
            byte-for-byte - this middleware makes zero behavior change here)
-       -> resolves, tenant.status != Suspended -> pass through unchanged
-       -> resolves, tenant.status == Suspended -> 423 response, request stops HERE -
-          InitializeTenancyByDomain never runs, DatabaseTenancyBootstrapper never
-          runs, the tenant database connection is never opened
-  -> (only reached for a non-suspended, resolvable host) InitializeTenancyByDomain
-     runs normally, exactly as it always has
+       -> resolves, tenant.status == Ready -> pass through unchanged
+       -> resolves, tenant.status == Suspended -> 423 response, request stops HERE
+       -> resolves, any other status (Pending/Provisioning/Failed/Deleting/Deleted,
+          or any future/unrecognized case - a PHP `match` with only Ready/Suspended
+          as explicit arms and a reject-by-default `default` arm) -> 503 response,
+          request stops HERE
+       -> in every blocking case: InitializeTenancyByDomain never runs,
+          DatabaseTenancyBootstrapper never runs, the tenant database connection
+          is never opened
+  -> (only reached for a Ready, resolvable host) InitializeTenancyByDomain runs
+     normally, exactly as it always has
 ```
 
-**Why a dedicated middleware, not a listener on the tenancy-initialization event** (the more "elegant"-looking option that turns out to be wrong): `Stancl\Tenancy\Events\InitializingTenancy` fires for every call to `Tenancy::initialize()`, including trusted, Platform-Admin-initiated internal calls like `platform.tenants.migrate-pending` (`TenantProvisioner::remigrate()`, which the task's own established contract requires to work "against any tenant, any number of times, regardless of status" - TASK-ARCH-010/R33). A listener there cannot tell a real inbound HTTP request apart from Platform Admin's own trusted backend code touching the same tenant - both call the identical method. `BlockSuspendedTenants`, scoped to the `web` HTTP middleware group only, naturally never runs for any internal `$tenant->run()` call (none of them pass through any HTTP middleware pipeline), so it can never block Platform Admin's own legitimate maintenance actions against a Suspended tenant.
+**Why a dedicated middleware, not a listener on the tenancy-initialization event** (the more "elegant"-looking option that turns out to be wrong): `Stancl\Tenancy\Events\InitializingTenancy` fires for every call to `Tenancy::initialize()`, including trusted, Platform-Admin-initiated internal calls like `platform.tenants.provision`/`migrate-pending` (`TenantProvisioner::provision()`/`remigrate()`, which must work against a Pending/Provisioning/Failed tenant by design - that is the entire point of the provision/retry action, TASK-ARCH-010/R33). A listener there cannot tell a real inbound HTTP request apart from Platform Admin's own trusted backend code touching the same tenant - both call the identical method. `TenantAccessGate`, scoped to the `web` HTTP middleware group only, naturally never runs for any internal `$tenant->run()` call (none of them pass through any HTTP middleware pipeline), so it can never block Platform Admin's own legitimate maintenance actions against a non-Ready tenant. This is proven live by `tests/Feature/Platform/TenantAccessGateTest.php` test 16 (a Failed tenant with no physical database is provisioned to Ready through the real `platform.tenants.provision` route while the gate is fully active).
 
-**Response semantics**: `423 Locked` (not 403/404/503 - see docs/architecture/security.md's "Suspended tenant access" section for the reasoning), HTML for a normal browser request (`tenancy::suspended`, a small Platform-owned view - no `packages/Webkul` view touched), structured JSON (`{"message": "..."}`) for any request that `wantsJson()` - covering Shop, Admin, and API requests uniformly, since all three run through the identical `web` middleware group.
-
-**Deliberately NOT extended to `Pending`/`Provisioning`/`Failed`**: those tenants already have a resolvable `domains` row (created at tenant-creation time, before provisioning even starts, per every established test fixture in this codebase) and currently resolve normally if their domain is hit directly - `DatabaseTenancyBootstrapper` does not check `status` at all today. This is a real, pre-existing gap the sketch above already anticipated ("tenant.status != 'ready'") but TASK-ARCH-013 does not fix it - out of this task's explicitly Ready<->Suspended-only scope. Noted here for whoever picks up the remaining lifecycle states later, not silently ignored.
+**Response semantics**: `423 Locked` for `Suspended` only (unchanged since TASK-ARCH-013 - see docs/architecture/security.md's "Tenant suspension bypass" row and DECISION_LOG.md C28 for the reasoning); `503 Service Unavailable` for every other non-Ready status (DECISION_LOG.md C30) - HTML for a normal browser request (`tenancy::suspended` / `tenancy::unavailable`, small Platform-owned views - no `packages/Webkul` view touched), structured JSON (`{"message": "This store is currently unavailable."}`) for any request that `wantsJson()` - covering Shop, Admin, and API requests uniformly, since all three run through the identical `web` middleware group. Neither response body ever mentions the tenant's id, database name, provisioning state, or an exception message - both are static, generic text (`tests/Feature/Platform/TenantAccessGateTest.php` test 9 asserts this directly for the JSON body).
 
 ## TASK-ARCH-003: implemented and proven — the actual wiring
 
