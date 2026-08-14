@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Platform\Plans\Models\Plan;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use RuntimeException;
@@ -50,6 +51,7 @@ class TenantProvisioner
             $this->ensureFilesystemPrepared($tenant);
             $this->ensureMigrated($tenant);
             $this->ensureSeeded($tenant);
+            $this->ensureDefaultPlanAssigned($tenant);
 
             $tenant->forceFill(['status' => TenantStatus::Ready])->save();
         } catch (Throwable $e) {
@@ -173,5 +175,47 @@ class TenantProvisioner
 
             Artisan::call('db:seed', ['--force' => true]);
         });
+    }
+
+    /**
+     * Step 5 (TASK-ARCH-008): assign the tenant its default plan. A
+     * CENTRAL operation (updates the `tenants` row itself), NOT wrapped
+     * in tenant->run() - plan assignment has nothing to do with the
+     * tenant's own database. Idempotent: no-ops if a plan is already
+     * assigned (covers both "resuming a partially-provisioned tenant" and
+     * "provision() called again on an already-READY tenant").
+     *
+     * Looked up by a stable CODE (config('platform.plans.default_code'),
+     * default 'free'), never a raw database id - ids are seed-order-
+     * dependent per environment. Fails loudly (not silently) if the
+     * configured default plan does not exist, per this task's explicit
+     * "provisioning must fail clearly" instruction - see
+     * Platform\Plans\Console\Commands\SeedPlans, which must be run once
+     * per environment before any tenant is provisioned.
+     *
+     * DEPENDENCY-DIRECTION NOTE: this is the one deliberate exception to
+     * Platform\Plans depending on Platform\Tenancy (never the reverse) -
+     * see DECISION_LOG.md. Plan assignment is fundamentally a
+     * provisioning-lifecycle concern (matching this class's existing
+     * responsibility for every other tenant-readiness step), not
+     * business logic Platform\Plans itself needs to know about;
+     * Platform\Plans has zero knowledge of provisioning in return.
+     */
+    protected function ensureDefaultPlanAssigned(Tenant $tenant): void
+    {
+        if ($tenant->plan_id !== null) {
+            return;
+        }
+
+        $code = config('platform.plans.default_code');
+        $plan = Plan::where('code', $code)->first();
+
+        if (! $plan) {
+            throw new RuntimeException(
+                "Default plan [{$code}] does not exist. Run `php artisan platform:plans:seed` before provisioning tenants."
+            );
+        }
+
+        $tenant->forceFill(['plan_id' => $plan->id])->save();
     }
 }

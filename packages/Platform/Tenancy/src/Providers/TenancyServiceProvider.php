@@ -4,14 +4,17 @@ declare(strict_types=1);
 
 namespace Platform\Tenancy\Providers;
 
+use Illuminate\Database\Events\MigrationStarted;
 use Illuminate\Queue\Events\JobReleasedAfterException;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
+use Platform\Tenancy\Console\Commands\MigrateCentral;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
+use Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema;
 use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Stancl\Tenancy\Events;
@@ -114,6 +117,14 @@ class TenancyServiceProvider extends ServiceProvider
             JobReleasedAfterException::class => [
                 EndTenancyAfterJobRelease::class,
             ],
+
+            // TASK-ARCH-008 cleanup round (R30): a defense-in-depth safety
+            // net, not the primary mechanism (that's the dedicated
+            // `platform:migrate:central` command) - see
+            // PreventCentralMigrationOfTenantSchema's own docblock.
+            MigrationStarted::class => [
+                PreventCentralMigrationOfTenantSchema::class,
+            ],
         ];
     }
 
@@ -149,6 +160,7 @@ class TenancyServiceProvider extends ServiceProvider
                 ProvisionTenant::class,
                 MarkPlatformInstalled::class,
                 ReindexTenant::class,
+                MigrateCentral::class,
             ]);
         }
     }

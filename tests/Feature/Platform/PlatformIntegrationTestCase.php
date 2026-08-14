@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Platform;
 
+use Platform\Plans\Services\PlanSeeder;
 use Tests\TestCase;
 
 /**
@@ -47,4 +48,28 @@ use Tests\TestCase;
 abstract class PlatformIntegrationTestCase extends TestCase
 {
     protected $connectionsToTransact = [];
+
+    /**
+     * TASK-ARCH-008: Platform\Tenancy\Services\TenantProvisioner::
+     * ensureDefaultPlanAssigned() (a real, permanent provisioning step,
+     * not test-only) fails provisioning loudly if the configured default
+     * plan doesn't exist in the central database - by design, so a
+     * misconfigured production deployment can't silently provision
+     * plan-less tenants. Every Platform integration test file provisions
+     * at least one tenant in its own fixture setup, so this base class
+     * runs the real, idempotent, central-only Platform\Plans\Services\
+     * PlanSeeder before each test - the test-suite equivalent of the
+     * one-time `php artisan platform:plans:seed` deployment step
+     * production needs before provisioning any tenant (see that
+     * command's docblock). Deliberately NOT a test-only reimplementation
+     * of seeding (unlike the queue-isolation probe tables, R6/TASK-ARCH-
+     * 006 - plans/plan_features are real production schema) - this calls
+     * the exact same production seeding logic every environment uses.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        app(PlanSeeder::class)->seed();
+    }
 }

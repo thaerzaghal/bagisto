@@ -1,6 +1,7 @@
 <?php
 
 use App\Providers\AppServiceProvider;
+use Platform\Plans\Providers\PlansServiceProvider;
 use Platform\Tenancy\Providers\TenancyServiceProvider;
 use Webkul\Admin\Providers\AdminServiceProvider;
 use Webkul\Attribute\Providers\AttributeServiceProvider;
@@ -58,6 +59,14 @@ return [
      * channel, or config value. See docs/architecture/tenancy.md (R9).
      */
     TenancyServiceProvider::class,
+
+    /**
+     * Plan/feature entitlement domain (TASK-ARCH-008) - depends on
+     * Platform\Tenancy (tenant model, tenancy() helpers), so registered
+     * after it; no ordering requirement relative to Webkul providers below
+     * (registers only a console command, no listeners/middleware/routes).
+     */
+    PlansServiceProvider::class,
 
     /**
      * Webkul's service providers.

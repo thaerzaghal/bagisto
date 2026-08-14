@@ -5,16 +5,18 @@
 Built on `stancl/tenancy`'s base `tenants`/`domains` tables, extended with platform-specific tables. Column lists below are the *proposed* final schema (not upstream-fixed) — confirm during Phase 3 implementation.
 
 **`tenants`** (extends stancl/tenancy's base table)
-`id` (tenant identifier, per stancl convention), `uuid`, `slug` (subdomain segment, unique), `name`, `status` (`pending|provisioning|ready|failed|suspended|deleting|deleted` — see [provisioning.md](provisioning.md)), `plan_id` (FK → `subscription_plans`), `db_name` (physical tenant database name, may be derivable from `id`/`slug` but stored explicitly for auditability), `data` (JSON, tenant-specific misc config), timestamps.
+`id` (tenant identifier, per stancl convention), `uuid`, `slug` (subdomain segment, unique), `name`, `status` (`pending|provisioning|ready|failed|suspended|deleting|deleted` — see [provisioning.md](provisioning.md)), `plan_id` (FK → `plans`, **implemented TASK-ARCH-008** — see below and DECISION_LOG.md for why it lives directly here rather than a separate assignment table), `db_name` (physical tenant database name, may be derivable from `id`/`slug` but stored explicitly for auditability), `data` (JSON, tenant-specific misc config), timestamps.
+
+**IMPORTANT, found live during TASK-ARCH-008**: `status`/`last_error`/`plan_id` must be explicitly declared in `Platform\Tenancy\Models\Tenant::getCustomColumns()` (overriding `Stancl\VirtualColumn\VirtualColumn`'s default of `['id']` only) or they silently get written into the `data` JSON blob instead of their real columns - see RISK_REGISTER.md R31 for the full finding (this had been true of `status`/`last_error` since TASK-ARCH-002, invisible until TASK-ARCH-008 ran the first raw SQL query against `tenants` in this project's history).
 
 **`domains`** (stancl/tenancy base table, used as-is)
 `domain`, `tenant_id`, plus our additions: `is_primary` (bool), `is_custom` (bool — false for `{slug}.platform.<domain>`, true for a bring-your-own domain), `verified_at` (nullable — custom domains require DNS verification before activation, see [domain-routing.md](domain-routing.md)).
 
-**`subscription_plans`**
-`id`, `code` (e.g. `free`, `basic`, `pro`), `name`, `price_monthly`, `price_yearly`, `trial_days`, `is_active`, `sort`.
+**`plans`** (renamed from the originally-sketched `subscription_plans` — **implemented TASK-ARCH-008**, see DECISION_LOG.md for the rename reasoning)
+`id`, `code` (e.g. `free`, `basic`, `pro`), `name`, `description`, `is_active`, `sort_order`. `price_monthly`/`price_yearly`/`trial_days` deliberately **not** added yet — TASK-ARCH-008 explicitly excludes billing/subscription concerns; these are a simple additive migration whenever Phase 10/11 actually need them.
 
-**`plan_features`**
-`plan_id` (FK), `feature_code` (string, e.g. `product_limit`, `staff_limit`, `custom_domain`), `type` (`boolean|numeric|unlimited`), `value` (nullable numeric — null + type=`unlimited` means no cap; irrelevant for `boolean`). See [feature-limits.md](feature-limits.md) for why this is a generic key-value design rather than hardcoded columns.
+**`plan_features`** (**implemented TASK-ARCH-008**)
+`plan_id` (FK), `feature_code` (string, e.g. `products.limit`, `staff.limit`, `domains.custom`), `type` (`boolean|numeric|unlimited`), `value` (nullable integer — null + type=`unlimited` means no cap; `0`/`1` for `boolean`). See [feature-limits.md](feature-limits.md) for why this is a generic key-value design rather than hardcoded columns.
 
 **`subscriptions`**
 `id`, `tenant_id` (FK), `plan_id` (FK), `status` (`trialing|active|past_due|grace|canceled|expired`), `trial_ends_at`, `current_period_start`, `current_period_end`, `cancels_at`, `canceled_at`, `grace_period_ends_at`. See [subscriptions.md](subscriptions.md).
