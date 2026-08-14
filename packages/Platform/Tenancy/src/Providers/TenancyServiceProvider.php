@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\MigrateCentral;
+use Platform\Tenancy\Console\Commands\MigratePendingTenants;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
@@ -161,6 +162,7 @@ class TenancyServiceProvider extends ServiceProvider
                 MarkPlatformInstalled::class,
                 ReindexTenant::class,
                 MigrateCentral::class,
+                MigratePendingTenants::class,
             ]);
         }
     }

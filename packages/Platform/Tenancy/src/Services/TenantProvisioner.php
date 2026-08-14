@@ -135,6 +135,27 @@ class TenantProvisioner
     }
 
     /**
+     * TASK-ARCH-010 (R33): re-run tenant migrations against an ALREADY-
+     * READY tenant, bypassing provision()'s own early return
+     * (`if ($tenant->status === TenantStatus::Ready) return;`). Exists
+     * specifically as the repair mechanism for tenants provisioned before
+     * a new tenant-scoped migration (e.g. the new `sessions` table) was
+     * added: safe to call on any tenant regardless of status, any number
+     * of times, for the same reason ensureMigrated() itself always has
+     * been - Laravel's own `migrations` table tracks what has already run
+     * per tenant database and skips it, so this only ever applies
+     * genuinely NEW migration files, never re-applies or duplicates
+     * anything. Does not touch status/last_error, seeding, or plan
+     * assignment - purely the migration step, on demand. See
+     * Platform\Tenancy\Console\Commands\MigratePendingTenants, the
+     * command that exposes this for existing environments.
+     */
+    public function remigrate(Tenant $tenant): void
+    {
+        $this->ensureMigrated($tenant);
+    }
+
+    /**
      * Step 3: run every Bagisto package migration (discovered dynamically,
      * not a maintained list - see docs/architecture/provisioning.md "Bagisto
      * tenant migration strategy") plus anything under database/migrations/tenant,
