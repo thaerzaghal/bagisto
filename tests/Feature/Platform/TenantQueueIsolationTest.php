@@ -212,6 +212,26 @@ function processOneQueuedJob(): string
 beforeEach(function () {
     config(['queue.default' => 'redis']);
 
+    // TASK-ARCH-007A (R29): this file's own comment below already claimed the
+    // cache here is "real redis... external, persistent state", and already
+    // flushed the real redis 'cache' connection - but never actually forced
+    // cache.default to 'redis', so it silently ran against the test-suite's
+    // CACHE_STORE=array default instead. docs/architecture/caching.md
+    // (TASK-ARCH-004) already documented, and this task re-confirmed live via
+    // spl_object_id(), that CacheTenancyBootstrapper creates a brand-new
+    // CacheManager on every tenancy bootstrap cycle - array's in-process
+    // storage does not survive that (by design, not a bug: no cross-tenant
+    // leak either way, just no cross-cycle persistence), while redis's
+    // external storage does. This file's own probe tests dispatch a real job
+    // through a real worker - a genuine bootstrap-cycle boundary - and then
+    // read the cache back in a separate cycle, exactly the case array cannot
+    // support. Forcing redis here (already the project's documented
+    // production cache store, not introduced by this fix) makes the test
+    // exercise the same real, persistent, external backing store this file
+    // already uses for its queue - matching this file's own "real Redis
+    // queue... nothing mocked, no fake queue" standard (see top docblock).
+    config(['cache.default' => 'redis']);
+
     // The real redis queue AND cache are shared, external, persistent state
     // (unlike a DB transaction, nothing rolls this back between tests) -
     // start every test from a genuinely empty queue and cache so no other
