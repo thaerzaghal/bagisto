@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Platform\Tenancy\Providers;
 
+use Illuminate\Queue\Events\JobReleasedAfterException;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
+use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
@@ -91,6 +93,17 @@ class TenancyServiceProvider extends ServiceProvider
                 Listeners\UpdateSyncedResource::class,
             ],
             Events\SyncedResourceChangedInForeignDatabase::class => [],
+
+            // TASK-ARCH-006 (R6/R7): a real, reproduced gap in Stancl\Tenancy\
+            // Bootstrappers\QueueTenancyBootstrapper's own cleanup - it only
+            // reverts tenancy on JobProcessed/JobFailed, neither of which fires
+            // when a job throws but still has retries remaining (Laravel fires
+            // JobReleasedAfterException instead in that case). See
+            // Platform\Tenancy\Listeners\EndTenancyAfterJobRelease for the full
+            // reproduction and reasoning.
+            JobReleasedAfterException::class => [
+                EndTenancyAfterJobRelease::class,
+            ],
         ];
     }
 
