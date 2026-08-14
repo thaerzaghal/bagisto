@@ -16,17 +16,36 @@ use Stancl\Tenancy\Controllers\TenantAssetsController;
 | file for the full ordering rationale. This file now only needs the plain
 | 'web' group like any other route file. Real tenant-facing routing
 | (delegating to Bagisto's own already-tenant-aware Shop/Admin routes) is
-| what's actually exercised in tests/Feature/Platform/TenantDomainRoutingTest.php;
-| this placeholder route is kept only as a minimal smoke test that a request
-| reaching THIS file also has a resolved tenant.
+| what's actually exercised in tests/Feature/Platform/TenantDomainRoutingTest.php.
+|
+| TASK-ARCH-009 (RISK_REGISTER.md R32): this file used to also register a
+| placeholder `Route::get('/', function () {...})` smoke-test route, kept
+| "only as a minimal smoke test that a request reaching THIS file also has
+| a resolved tenant" per its own original comment. Removed here - found
+| live, the hard way, that it was silently destroying Bagisto's real
+| storefront homepage route (`shop.home.index`, packages/Webkul/Shop/src/
+| Routes/store-front-routes.php) for every tenant, this whole engagement.
+| Root cause: this file is loaded via TenancyServiceProvider::mapRoutes()'s
+| $this->app->booted(...) callback, which fires AFTER every other package's
+| boot() (including Shop's) - so this placeholder's identical, unnamed
+| `GET /` registration was always the LAST one Laravel's RouteCollection
+| saw for that exact URI+method, completely replacing (not merely
+| shadowing) Shop's named, real route at the same array key - `Route::has
+| ('shop.home.index')` returned false because the named route object no
+| longer existed in the collection at all, not because it was merely
+| unreachable. Invisible until now because no test in this engagement had
+| ever rendered a page needing `route('shop.home.index')` (the admin
+| layout's own header does, surfaced by TASK-ARCH-009's first real admin
+| page) or asserted on the real storefront homepage's actual content
+| (existing tests only ever hit API endpoints, never bare `/`). The
+| placeholder's own stated purpose (prove a request reaching this file has
+| a resolved tenant) has been fully superseded by real tests since
+| TASK-ARCH-003 (TenantDomainRoutingTest.php etc., against real Bagisto
+| endpoints) - nothing else in this file needs to occupy `/` at all.
 |
 */
 
 Route::middleware(['web'])->group(function () {
-    Route::get('/', function () {
-        return 'This is your multi-tenant application. The id of the current tenant is '.tenant('id');
-    });
-
     /*
     |----------------------------------------------------------------------
     | TASK-ARCH-005 (R16): tenant-aware "/storage/{path}" serving
