@@ -7,6 +7,7 @@ namespace Platform\Admin\Http\Controllers;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
+use Platform\Billing\Models\Payment;
 use Platform\Plans\Exceptions\InactivePlanAssignmentException;
 use Platform\Plans\Models\Plan;
 use Platform\Subscriptions\Enums\SubscriptionStatus;
@@ -83,6 +84,15 @@ class TenantController
             'assignablePlans' => Plan::where('is_active', true)
                 ->orWhere('id', $tenant->plan_id)
                 ->orderBy('sort_order')
+                ->get(),
+            // TASK-ARCH-019 (task section 24): minimal operational
+            // visibility only - date/provider/amount/currency/status/
+            // provider reference. Deliberately no `provider_metadata`
+            // (raw provider payload) rendered anywhere - see
+            // tenants/show.blade.php.
+            'recentPayments' => Payment::where('tenant_id', $tenant->getTenantKey())
+                ->latest('id')
+                ->limit(10)
                 ->get(),
         ]);
     }

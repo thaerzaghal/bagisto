@@ -153,9 +153,12 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
   deactivated, plus (since TASK-ARCH-016) a "Subscription" card - status,
   plan, `starts_at`, `trial_ends_at`, current period, `cancel_at_period_end`,
   `cancelled_at`/`ended_at` where relevant, with conditional action
-  buttons matching the subscription's current status. No billing/payment
-  section on the TENANT detail page (out of scope, no live payment flow
-  exists yet - see docs/architecture/billing.md; TASK-ARCH-019).
+  buttons matching the subscription's current status, plus (since
+  TASK-ARCH-019) a "Recent Payments" table - date/provider/amount/
+  currency/status/provider reference, last 10, no raw provider payload
+  ever rendered (`Platform\Billing\Models\Payment`, read-only - see
+  docs/architecture/billing.md "Platform Admin billing visibility"). Not
+  an accounting dashboard.
 - **Plan list**: code, name, active flag, sort order, configured feature
   count (`Plan::withCount('features')`), each code linking to its detail
   page (TASK-ARCH-015). No pricing/billing fields on this LIST page —

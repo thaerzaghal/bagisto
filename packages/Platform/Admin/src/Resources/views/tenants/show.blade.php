@@ -95,6 +95,43 @@
         @endif
     </div>
 
+    <div class="card" style="margin-top: 1.5rem;">
+        <h2 style="margin-top: 0;">Recent Payments</h2>
+
+        {{--
+            TASK-ARCH-019 (task section 24): minimal operational visibility
+            only - date/provider/amount/currency/status/provider reference.
+            Deliberately NOT an accounting dashboard, and no raw provider
+            payload (provider_metadata) is ever rendered here.
+        --}}
+        @if ($recentPayments->isEmpty())
+            <p>No payments recorded for this tenant.</p>
+        @else
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Provider</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Provider reference</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($recentPayments as $payment)
+                        <tr>
+                            <td>{{ $payment->created_at->toDateTimeString() }}</td>
+                            <td>{{ $payment->provider }}</td>
+                            <td>{{ number_format($payment->amount_minor / 100, 2) }} {{ $payment->currency }}</td>
+                            <td>{{ ucfirst(str_replace('_', ' ', $payment->status->value)) }}</td>
+                            <td>{{ $payment->provider_reference ?? '-' }}</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+        @endif
+    </div>
+
     <div class="card" style="margin-top: 1.5rem; max-width: 420px;">
         <h2 style="margin-top: 0;">Change Plan</h2>
 

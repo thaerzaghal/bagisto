@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Platform\Billing\Adapters;
 
 use Platform\Billing\Contracts\PaymentProvider;
+use Platform\Billing\DTOs\CheckoutSession;
 use Platform\Billing\DTOs\PaymentResult;
 use Platform\Billing\Enums\PaymentStatus;
 use Platform\Billing\Exceptions\MissingProviderCredentialsException;
 use Platform\Billing\Models\Payment;
+use Stripe\Checkout\Session;
 use Stripe\PaymentIntent;
 use Stripe\StripeClient;
 
@@ -26,11 +28,13 @@ use Stripe\StripeClient;
  * correctly, and Stripe SDK objects never leak past `mapPaymentIntentToResult()`
  * - every public method returns only `Platform\Billing\DTOs\PaymentResult`.
  *
- * NOT IMPLEMENTED HERE, DELIBERATELY (task section 15/28, out of scope
- * until TASK-ARCH-019): the browser checkout redirect flow and webhook
- * endpoint processing. `createPayment()` creates a real server-side
- * PaymentIntent (proving the SDK call/response-mapping path end-to-end)
- * without building any client-facing confirmation UI.
+ * TASK-ARCH-019 added `createCheckout()` (Stripe Checkout Session, hosted
+ * payment page - see that method's own docblock for the payment-vs-
+ * subscription-mode decision) - the browser-facing half of this adapter.
+ * Webhook signature verification/event parsing is a SEPARATE class,
+ * `Platform\Billing\Adapters\StripeWebhookVerifier` (task section 26 -
+ * not every future provider shares Stripe's signature concept, so it
+ * does not belong on this class or the shared `PaymentProvider` contract).
  *
  * CREDENTIAL FAILURE (task section 4): thrown here, in the constructor,
  * the moment something actually tries to resolve a Stripe provider
@@ -81,6 +85,53 @@ class StripePaymentProvider implements PaymentProvider
         $intent = $this->client->paymentIntents->retrieve($providerReference);
 
         return $this->mapPaymentIntentToResult($intent);
+    }
+
+    /**
+     * TASK-ARCH-019 (task section 6). Stripe Checkout Session in "payment"
+     * mode (NOT "subscription" mode) - a hosted, one-off payment page,
+     * deliberately never creating a Stripe-owned Subscription object.
+     * `Platform\Subscriptions` remains the sole subscription lifecycle
+     * source of truth; Stripe here only ever processes the payment.
+     *
+     * The line item is built entirely from `$payment`'s own already-
+     * authoritative `amount_minor`/`currency` (never re-read from
+     * `PlanPrice` here - `$payment` is already the snapshot) - Stripe
+     * itself becomes a second, independent confirmation of the same
+     * amount this platform already decided, not a source of new pricing
+     * data.
+     */
+    public function createCheckout(Payment $payment, string $successUrl, string $cancelUrl): CheckoutSession
+    {
+        $session = $this->client->checkout->sessions->create([
+            'mode' => 'payment',
+            'success_url' => $successUrl,
+            'cancel_url' => $cancelUrl,
+            'line_items' => [[
+                'quantity' => 1,
+                'price_data' => [
+                    'currency' => strtolower($payment->currency),
+                    'unit_amount' => $payment->amount_minor,
+                    'product_data' => [
+                        'name' => 'Platform subscription payment',
+                    ],
+                ],
+            ]],
+            'metadata' => [
+                'tenant_id' => $payment->tenant_id,
+                'payment_id' => (string) $payment->id,
+            ],
+        ]);
+
+        return $this->mapSessionToCheckoutSession($session);
+    }
+
+    protected function mapSessionToCheckoutSession(Session $session): CheckoutSession
+    {
+        return new CheckoutSession(
+            providerReference: $session->id,
+            redirectUrl: (string) $session->url,
+        );
     }
 
     protected function mapPaymentIntentToResult(PaymentIntent $intent): PaymentResult

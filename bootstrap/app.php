@@ -123,6 +123,17 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $middleware->validateCsrfTokens(except: [
             'stripe/*',
+
+            /**
+             * TASK-ARCH-019. Platform\Billing's own Stripe webhook
+             * endpoint - a server-to-server call with no browser session,
+             * where CSRF protection has no meaning. Deliberately a
+             * DIFFERENT path from the pre-existing 'stripe/*' entry above
+             * (packages/Webkul/Stripe's own, unrelated storefront-order
+             * webhook) - never reused, to avoid any route collision or
+             * conflating the two integrations.
+             */
+            'billing/webhook/*',
         ]);
 
         $middleware->trustProxies(at: '*');

@@ -7,6 +7,23 @@
         <p class="text-xl font-bold text-gray-800 dark:text-white">
             My Plan
         </p>
+
+        {{--
+            TASK-ARCH-019. A plain route() link to Platform\Billing's own
+            checkout page - deliberately NOT a PHP/controller-level
+            dependency on Platform\Billing from this package (Platform\Plans
+            must never depend on Platform\Billing - see
+            Platform\Billing\Providers\BillingServiceProvider's own
+            dependency-direction docblock). A Blade route() call resolves
+            at runtime against whatever is registered, with zero compile-
+            time import - this is the only connection between the two
+            packages' UI.
+        --}}
+        @if (\Illuminate\Support\Facades\Route::has('admin.saas.checkout.index'))
+            <a href="{{ route('admin.saas.checkout.index') }}" class="primary-button">
+                Upgrade Plan
+            </a>
+        @endif
     </div>
 
     @if (! $plan)

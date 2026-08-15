@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Platform\Billing\Contracts;
 
+use Platform\Billing\DTOs\CheckoutSession;
 use Platform\Billing\DTOs\PaymentResult;
 use Platform\Billing\Models\Payment;
 
@@ -24,17 +25,13 @@ use Platform\Billing\Models\Payment;
  * product enforcement, or tenant lifecycle - none of those know a
  * PaymentProvider implementation exists at all.
  *
- * Checkout-initiation/webhook-specific methods are deliberately NOT part
- * of this contract yet (task section 2, explicit: "if checkout/webhook-
- * specific methods are not needed until TASK-ARCH-019, do not add
- * speculative methods now"). The two methods below are the minimum that
- * already has a real, non-speculative caller in THIS task
- * (Platform\Billing\Services\BillingService and its tests) and remain
- * directly useful to TASK-ARCH-019's later checkout/webhook flow -
- * `createPayment()` to start a real provider-side payment attempt,
- * `retrievePayment()` to re-verify a payment's true state directly from
- * the provider rather than trusting any client-supplied signal (task
- * section 14/23's "never trust the browser redirect" invariant).
+ * `createCheckout()` was added in TASK-ARCH-019, once a real caller
+ * (`Platform\Billing\Services\CheckoutService`) existed to justify its
+ * exact shape - not spec'd speculatively ahead of time (task section 2's
+ * original instruction). Webhook signature verification is deliberately
+ * NOT part of THIS contract - see `Platform\Billing\Contracts\
+ * WebhookVerifier`'s own docblock for why that is a separate,
+ * independent abstraction (task section 26).
  */
 interface PaymentProvider
 {
@@ -56,4 +53,16 @@ interface PaymentProvider
      * success.
      */
     public function retrievePayment(string $providerReference): PaymentResult;
+
+    /**
+     * Create a hosted, provider-owned checkout page for the given Payment
+     * (amount/currency already authoritatively set - never accepted here
+     * as parameters) and return a redirect URL. The provider itself
+     * collects payment details - this platform's own UI never handles
+     * card data directly. `$successUrl`/`$cancelUrl` are plain return
+     * URLs this platform controls; see `Platform\Billing\Services\
+     * CheckoutService`'s own docblock for why the success URL must never
+     * be trusted as proof of payment.
+     */
+    public function createCheckout(Payment $payment, string $successUrl, string $cancelUrl): CheckoutSession;
 }

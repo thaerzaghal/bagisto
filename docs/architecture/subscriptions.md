@@ -138,9 +138,11 @@ Tenant-detail integration, not a standalone dashboard (task section 15): a "Subs
 
 Extends the existing TASK-ARCH-009 page (`admin/saas/plan`), not a new route/menu entry. Shows plan, subscription status, trial end (if trialing), current period (if set), cancellation-at-period-end intent (if set). Deliberately does **not** show any price, payment method, invoice, or "next charge" amount - none of that data exists in this domain. Degrades gracefully for a tenant with no `Subscription` row (a genuinely possible transitional/test case; every tenant provisioned after this task, or covered by its backfill, has one).
 
-## Billing integration boundary (TASK-ARCH-018)
+## Billing integration boundary (TASK-ARCH-018, extended TASK-ARCH-019)
 
-`Platform\Billing` now exists (see [billing.md](billing.md)) and depends on this package (`Platform\Billing -> Platform\Subscriptions`) - never the reverse. Nothing in this package imports anything from `Platform\Billing`; `SubscriptionLifecycle` has not been modified by TASK-ARCH-018 and does not know a `Payment`/`PlanPrice`/`PaymentProvider` exists. TASK-ARCH-018 does not call `SubscriptionLifecycle::changePlan()` from anywhere in the Billing domain - wiring a confirmed payment to an actual plan change is TASK-ARCH-019's job, once a real checkout/webhook flow exists to call it from.
+`Platform\Billing` now exists (see [billing.md](billing.md)) and depends on this package (`Platform\Billing -> Platform\Subscriptions`) - never the reverse. Nothing in this package imports anything from `Platform\Billing`; `SubscriptionLifecycle` itself has not been modified by either task and does not know a `Payment`/`PlanPrice`/`PaymentProvider` exists - it has no idea Billing is even calling it.
+
+**TASK-ARCH-019 added the first real caller**: `Platform\Billing\Services\WebhookEventProcessor`, on a verified successful Stripe webhook event, calls `SubscriptionLifecycle::changePlan($subscription, $planPrice->plan)` - the exact same method TASK-ARCH-016 built and TASK-ARCH-018's Platform Admin "Change Plan" action already uses (`Platform\Admin\Http\Controllers\TenantController::changePlan()`). No duplicate plan-change logic exists - the webhook path and the manual Platform-Admin path both funnel through this one method, which itself still calls `TenantPlanAssignment::assign()` internally (unchanged since TASK-ARCH-015, the sole writer of `tenants.plan_id`). `WebhookEventProcessor` never writes `subscription.plan_id`/`subscription.status`/`tenant.plan_id` directly.
 
 ## What Phase 11 (Billing) will still need, unchanged from the original sketch
 
