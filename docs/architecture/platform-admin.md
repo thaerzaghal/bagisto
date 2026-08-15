@@ -133,6 +133,10 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
 | POST   | `/platform/tenants/{tenant}/subscription/activate` | `platform.tenants.subscription.activate` | `platform` |
 | POST   | `/platform/tenants/{tenant}/subscription/cancel-at-period-end` | `platform.tenants.subscription.cancel-at-period-end` | `platform` |
 | POST   | `/platform/tenants/{tenant}/subscription/cancel-immediately` | `platform.tenants.subscription.cancel-immediately` | `platform` |
+| POST   | `/platform/plans/{plan}/prices`         | `platform.plans.prices.store`     | `platform` |
+| PATCH  | `/platform/plans/{plan}/prices/{price}` | `platform.plans.prices.update`    | `platform` |
+| POST   | `/platform/plans/{plan}/prices/{price}/activate` | `platform.plans.prices.activate` | `platform` |
+| POST   | `/platform/plans/{plan}/prices/{price}/deactivate` | `platform.plans.prices.deactivate` | `platform` |
 
 ## Pages
 
@@ -150,18 +154,22 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
   plan, `starts_at`, `trial_ends_at`, current period, `cancel_at_period_end`,
   `cancelled_at`/`ended_at` where relevant, with conditional action
   buttons matching the subscription's current status. No billing/payment
-  section (out of scope, no such data exists - see
-  docs/architecture/subscriptions.md).
+  section on the TENANT detail page (out of scope, no live payment flow
+  exists yet - see docs/architecture/billing.md; TASK-ARCH-019).
 - **Plan list**: code, name, active flag, sort order, configured feature
   count (`Plan::withCount('features')`), each code linking to its detail
-  page (TASK-ARCH-015). No pricing/billing fields — `plans`/`plan_features`
-  don't have any (TASK-ARCH-008 deliberately didn't add them, TASK-ARCH-015
-  deliberately didn't either).
-- **Plan create/detail** (TASK-ARCH-015): create form (code/name/
-  description/sort_order/active); detail page combines an edit form
-  (name/description/sort_order — `code` is displayed but disabled, see
-  "Plan code policy" below) with the plan's feature list (add/edit/remove,
-  scoped to the known `FeatureCode` enum) and activate/deactivate actions.
+  page (TASK-ARCH-015). No pricing/billing fields on this LIST page —
+  pricing now exists (TASK-ARCH-018, `plan_prices`) but is managed on the
+  plan detail page, not summarized in the list.
+- **Plan create/detail** (TASK-ARCH-015, extended TASK-ARCH-018): create
+  form (code/name/description/sort_order/active); detail page combines an
+  edit form (name/description/sort_order — `code` is displayed but
+  disabled, see "Plan code policy" below), a **Prices** card
+  (`plan_prices` rows: interval/interval count/amount in minor units/
+  currency/active state, with add/edit/activate/deactivate actions - no
+  payment/checkout action anywhere on this page), and the plan's feature
+  list (add/edit/remove, scoped to the known `FeatureCode` enum) with
+  activate/deactivate actions.
 
 ## Actions
 

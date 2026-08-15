@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use Platform\Admin\Http\Controllers\DashboardController;
 use Platform\Admin\Http\Controllers\PlanController;
 use Platform\Admin\Http\Controllers\PlanFeatureController;
+use Platform\Admin\Http\Controllers\PlanPriceController;
 use Platform\Admin\Http\Controllers\SessionController;
 use Platform\Admin\Http\Controllers\SubscriptionController;
 use Platform\Admin\Http\Controllers\TenantController;
@@ -66,5 +67,11 @@ Route::middleware([EnsureCentralDomain::class, 'platform'])
             Route::post('plans/{plan}/features', [PlanFeatureController::class, 'store'])->name('plans.features.store');
             Route::patch('plans/{plan}/features/{feature}', [PlanFeatureController::class, 'update'])->name('plans.features.update');
             Route::delete('plans/{plan}/features/{feature}', [PlanFeatureController::class, 'destroy'])->name('plans.features.destroy');
+
+            // TASK-ARCH-018.
+            Route::post('plans/{plan}/prices', [PlanPriceController::class, 'store'])->name('plans.prices.store');
+            Route::patch('plans/{plan}/prices/{price}', [PlanPriceController::class, 'update'])->name('plans.prices.update');
+            Route::post('plans/{plan}/prices/{price}/activate', [PlanPriceController::class, 'activate'])->name('plans.prices.activate');
+            Route::post('plans/{plan}/prices/{price}/deactivate', [PlanPriceController::class, 'deactivate'])->name('plans.prices.deactivate');
         });
     });

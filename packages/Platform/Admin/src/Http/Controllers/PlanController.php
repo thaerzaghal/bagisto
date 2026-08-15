@@ -9,6 +9,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
+use Platform\Billing\Enums\BillingInterval;
+use Platform\Billing\Models\PlanPrice;
 use Platform\Plans\Enums\FeatureCode;
 use Platform\Plans\Enums\FeatureType;
 use Platform\Plans\Models\Plan;
@@ -84,12 +86,19 @@ class PlanController
     {
         $features = $plan->features()->orderBy('feature_code')->get();
 
+        // TASK-ARCH-018: PlanPrice::where('plan_id', ...), not a
+        // $plan->prices() relation - see PlanPriceController's own
+        // docblock for why Plan must never gain a relation into Billing.
+        $prices = PlanPrice::where('plan_id', $plan->id)->orderBy('billing_interval')->get();
+
         return view('platform::plans.show', [
             'plan' => $plan,
             'features' => $features,
             'availableFeatureCodes' => collect(FeatureCode::cases())
                 ->reject(fn ($case) => $features->contains('feature_code', $case->value)),
             'featureTypes' => FeatureType::cases(),
+            'prices' => $prices,
+            'billingIntervals' => BillingInterval::cases(),
         ]);
     }
 

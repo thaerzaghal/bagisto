@@ -605,3 +605,39 @@ The first real GitHub Actions run of `platform_tests.yml` (triggered by TASK-ARC
 **Local verification**: `CentralDatabaseWipeGuardTest.php` - 7 passed, 3 correctly skipped (real local `bagisto_central` present). Full `tests/Feature/Platform` suite and production-config smoke suite both re-run clean (see this task's own final report for exact counts). Both workflow files re-validated as syntactically correct YAML with `workflow_dispatch`-only triggering confirmed for `platform_tests.yml`. No `packages/Webkul` modification; no Subscription/Billing/Plans/Tenant-lifecycle/enforcement runtime code touched.
 
 **Per explicit instruction, all TASK-ARCH-017A changes remain uncommitted for review. Do NOT start TASK-ARCH-018.**
+
+**APPROVED and committed: `8ee5fd61c52a51fb0b7d75eb987cf2154f3f460f`.**
+
+## TASK-ARCH-018 — Billing Domain + Provider Abstraction + Pricing (2026-08-15).
+
+Scope-checkpoint approved as a deliberate split (task's own section 32): TASK-ARCH-018 builds the provider-agnostic billing domain and a Stripe reference adapter with **no live checkout/webhook flow** - that is TASK-ARCH-019, not started here.
+
+**New package**: `packages/Platform/Billing`, dependency direction `Platform\Billing -> Platform\Subscriptions -> Platform\Plans -> Platform\Tenancy` (DECISION_LOG C42). `Platform\Subscriptions` remains completely unaware Billing exists; `Plan` gained no relation into Billing (a real reverse-dependency mistake caught and fixed during review - RISK_REGISTER R46).
+
+**`PaymentProvider` contract**: two methods only (`createPayment()`, `retrievePayment()`), expressed in this platform's own terms, no Stripe-shaped naming. `PaymentResult` (a plain DTO) is the only shape any adapter may return - no provider SDK type ever crosses the boundary.
+
+**Provider resolution**: `BILLING_PROVIDER=stripe` (`config/platform-billing.php`), resolved through `BillingProviderResolver`'s single `match` expression - an unrecognized value throws `UnknownBillingProviderException`. Credentials are read only inside `StripePaymentProvider`'s own constructor, failing clearly (`MissingProviderCredentialsException`) only when the provider is actually used, never at application boot.
+
+**Pricing**: new central `plan_prices` table (`billing_interval`/`interval_count`/`amount_minor`/`currency`/`is_active`), a separate table from `plans` (DECISION_LOG C44) - supports monthly/yearly today, extensible without a schema change. Money is always an integer minor-units value, never a float, currency a plain normalized 3-letter code with no hardcoded USD assumption.
+
+**Payments**: new central `payments` table - `tenant_id`/`subscription_id` (nullable)/`plan_price_id` (nullable)/`provider`/`provider_reference`/`status` (`PaymentStatus`, deliberately minimal - DECISION_LOG C46)/`amount_minor`/`currency`/failure fields/`paid_at`/`failed_at`/`refunded_at`/`provider_metadata` (raw, audit-only JSON). `amount_minor`/`currency` are a historical snapshot, copied at creation and never re-derived from `plan_price_id` afterward (DECISION_LOG C45) - proven live: changing a `PlanPrice`'s amount does not alter an already-created `Payment`'s own values.
+
+**`BillingService::createPendingPayment()`**: the one entry point for creating a `Payment` - has no parameter through which a caller could supply its own amount/currency at all (both always copied from the given `PlanPrice`), and validates the given `Subscription` actually belongs to the given `Tenant` (`PaymentOwnershipException` otherwise).
+
+**`PaymentLifecycle`**: mirrors `SubscriptionLifecycle`'s shape - the one entry point for every `Payment` status transition (`markRequiresAction`/`markSucceeded`/`markFailed`/`markCanceled`/`markRefunded`), with its own transition matrix (`InvalidPaymentTransitionException` for anything else). No HTTP route anywhere calls it in this task - there is no public "mark paid" endpoint. `markFailed()` changes only the `Payment` itself - proven not to touch `TenantStatus` or `Subscription` status/plan (failed-payment policy remains an explicit, deferred decision). `markRefunded()` is a local status/`refunded_at` write only, with zero provider interaction and no caller anywhere - refunds are NOT an implemented capability in this task (see `docs/architecture/billing.md`), only a representable `PaymentStatus` state.
+
+**Stripe reference adapter**: `StripePaymentProvider` uses `stripe/stripe-php` (the raw SDK, already a dependency) directly - not `laravel/cashier` (DECISION_LOG C43, avoiding Cashier's own Stripe-shaped Subscription/Customer ownership conflicting with the already-built provider-neutral `Platform\Subscriptions` domain). Tested with zero network access via Stripe's own supported `\Stripe\ApiRequestor::setHttpClient()` test seam (canned JSON, real SDK deserialization) plus `\Stripe\PaymentIntent::constructFrom()` fixtures for pure mapping logic.
+
+**Free-plan behavior**: provisioning a tenant still creates exactly one `Subscription` (TASK-ARCH-016's invariant, unchanged) and zero `Payment` rows - no `$0` transaction is ever created merely because every tenant has a subscription.
+
+**Platform Admin**: a new "Prices" card on the existing plan detail page (`Platform\Admin\Http\Controllers\PlanPriceController` - list/create/update/activate/deactivate, server-owned money/currency validation, no payment/checkout action anywhere).
+
+**25 new tests**, `tests/Feature/Platform/PlatformBillingManagementTest.php`: central-only schema proof, monthly/yearly pricing, integer-minor-units money, currency normalization, authoritative-pricing derivation, historical-snapshot proof, inactive-price rejection, Pending-start proof, ownership enforcement, the full `PaymentLifecycle` transition matrix (including an invalid-transition rejection), failed-payment TenantStatus/Subscription independence, free-subscription-needs-no-payment proof, provider resolution (success/unknown/missing-credentials), Stripe SDK response mapping (success and failure, zero network), Platform Admin PlanPrice CRUD via real HTTP, unauthenticated-access rejection, central-connection-only proof, and cross-tenant payment isolation. All 25 passing.
+
+**Full Platform suite, DB migrations, and app boot verified**: no `packages/Webkul` modification; no `Platform\Subscriptions`/`Platform\Plans`/`Platform\Tenancy` runtime code touched (Billing depends on them, they remain unaware of Billing).
+
+**Documentation**: `docs/architecture/billing.md` fully rewritten from Phase 0 speculation to the real implementation record; `docs/architecture/subscriptions.md` (Billing integration boundary note), `docs/architecture/platform-admin.md` (routes table + Pages section extended), `docs/architecture/security.md` (new "Billing security invariants" section); `DECISION_LOG.md` (C42-C46 new, HUMAN DECISION item 2 resolved for development/reference purposes only); `RISK_REGISTER.md` (R46, R47 - both closed, low severity).
+
+**Proposed TASK-ARCH-019 scope** (not started): Stripe Sandbox Checkout + Webhooks - live checkout-initiation flow, webhook endpoint with signature verification and idempotent event processing, wiring a confirmed payment to `SubscriptionLifecycle::changePlan()`, Platform Admin billing visibility on the tenant detail page, the "never trust the browser redirect" enforcement, and the associated security audit.
+
+**Per explicit instruction, all TASK-ARCH-018 changes remain uncommitted for review. Do NOT start TASK-ARCH-019.**

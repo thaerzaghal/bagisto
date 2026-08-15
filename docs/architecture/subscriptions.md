@@ -138,6 +138,10 @@ Tenant-detail integration, not a standalone dashboard (task section 15): a "Subs
 
 Extends the existing TASK-ARCH-009 page (`admin/saas/plan`), not a new route/menu entry. Shows plan, subscription status, trial end (if trialing), current period (if set), cancellation-at-period-end intent (if set). Deliberately does **not** show any price, payment method, invoice, or "next charge" amount - none of that data exists in this domain. Degrades gracefully for a tenant with no `Subscription` row (a genuinely possible transitional/test case; every tenant provisioned after this task, or covered by its backfill, has one).
 
+## Billing integration boundary (TASK-ARCH-018)
+
+`Platform\Billing` now exists (see [billing.md](billing.md)) and depends on this package (`Platform\Billing -> Platform\Subscriptions`) - never the reverse. Nothing in this package imports anything from `Platform\Billing`; `SubscriptionLifecycle` has not been modified by TASK-ARCH-018 and does not know a `Payment`/`PlanPrice`/`PaymentProvider` exists. TASK-ARCH-018 does not call `SubscriptionLifecycle::changePlan()` from anywhere in the Billing domain - wiring a confirmed payment to an actual plan change is TASK-ARCH-019's job, once a real checkout/webhook flow exists to call it from.
+
 ## What Phase 11 (Billing) will still need, unchanged from the original sketch
 
 See [billing.md](billing.md) for the full boundary. In short: a `BillingProvider` interface, a separate `billing_accounts` table for provider-specific columns, webhook handling, and (only then) a real `past_due` status with an automatic transition trigger. None of that exists yet, and none of it was pulled forward by this task.

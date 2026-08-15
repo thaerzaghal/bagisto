@@ -51,6 +51,88 @@
         </p>
     </div>
 
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <h2 style="margin-top: 0;">Prices</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Interval</th>
+                    <th>Interval count</th>
+                    <th>Amount (minor units)</th>
+                    <th>Currency</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @forelse ($prices as $price)
+                    <tr>
+                        <td>
+                            <form class="inline" method="POST" action="{{ route('platform.plans.prices.update', [$plan, $price]) }}">
+                                @csrf
+                                @method('PATCH')
+                                <select name="billing_interval">
+                                    @foreach ($billingIntervals as $interval)
+                                        <option value="{{ $interval->value }}" {{ $price->billing_interval === $interval ? 'selected' : '' }}>{{ $interval->value }}</option>
+                                    @endforeach
+                                </select>
+                        </td>
+                        <td>
+                                <input type="number" name="interval_count" min="1" value="{{ $price->interval_count }}" style="width: 5rem;">
+                        </td>
+                        <td>
+                                <input type="number" name="amount_minor" min="0" value="{{ $price->amount_minor }}" style="width: 7rem;">
+                        </td>
+                        <td>
+                                <input type="text" name="currency" maxlength="3" value="{{ $price->currency }}" style="width: 4rem;">
+                        </td>
+                        <td>{{ $price->is_active ? 'active' : 'inactive' }}</td>
+                        <td>
+                                <button type="submit">Save</button>
+                            </form>
+                            @if ($price->is_active)
+                                <form class="inline" method="POST" action="{{ route('platform.plans.prices.deactivate', [$plan, $price]) }}">
+                                    @csrf
+                                    <button type="submit">Deactivate</button>
+                                </form>
+                            @else
+                                <form class="inline" method="POST" action="{{ route('platform.plans.prices.activate', [$plan, $price]) }}">
+                                    @csrf
+                                    <button type="submit">Activate</button>
+                                </form>
+                            @endif
+                        </td>
+                    </tr>
+                @empty
+                    <tr><td colspan="6">No prices configured for this plan.</td></tr>
+                @endforelse
+            </tbody>
+        </table>
+
+        <h3>Add price</h3>
+
+        <form method="POST" action="{{ route('platform.plans.prices.store', $plan) }}">
+            @csrf
+
+            <select name="billing_interval">
+                @foreach ($billingIntervals as $interval)
+                    <option value="{{ $interval->value }}">{{ $interval->value }}</option>
+                @endforeach
+            </select>
+
+            <input type="number" name="interval_count" min="1" value="1" placeholder="interval count" style="width: 5rem;">
+
+            <input type="number" name="amount_minor" min="0" placeholder="amount (minor units)" style="width: 7rem;">
+
+            <input type="text" name="currency" maxlength="3" placeholder="USD" style="width: 4rem;">
+
+            <button type="submit">Add price</button>
+        </form>
+
+        <p><small>Amounts are integer minor units (e.g. 1000 = 10.00 for a 2-decimal currency) - never a decimal/float.</small></p>
+    </div>
+
     <div class="card">
         <h2 style="margin-top: 0;">Features</h2>
 

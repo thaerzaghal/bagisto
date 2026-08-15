@@ -2,6 +2,7 @@
 
 use App\Providers\AppServiceProvider;
 use Platform\Admin\Providers\PlatformAdminServiceProvider;
+use Platform\Billing\Providers\BillingServiceProvider;
 use Platform\Enforcement\Providers\EnforcementServiceProvider;
 use Platform\Plans\Providers\PlansServiceProvider;
 use Platform\Subscriptions\Providers\SubscriptionsServiceProvider;
@@ -81,6 +82,19 @@ return [
      * directly. See docs/architecture/subscriptions.md.
      */
     SubscriptionsServiceProvider::class,
+
+    /**
+     * TASK-ARCH-018: the provider-agnostic billing domain
+     * (Platform\Billing\Services\BillingService/PaymentLifecycle, the
+     * PaymentProvider contract, the Stripe reference adapter) - depends on
+     * Platform\Subscriptions/Platform\Plans/Platform\Tenancy (all
+     * registered above), so registered after all three. Binds
+     * PaymentProvider::class in register() (config-driven resolution via
+     * BillingProviderResolver); registers no listeners/middleware/routes
+     * of its own in this task - no checkout/webhook HTTP endpoint exists
+     * yet (TASK-ARCH-019). See docs/architecture/billing.md.
+     */
+    BillingServiceProvider::class,
 
     /**
      * TASK-ARCH-011: the CENTRAL Platform Admin area (tenants/plans/
