@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Platform\Tenancy\Providers;
 
+use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Database\Events\MigrationStarted;
 use Illuminate\Queue\Events\JobReleasedAfterException;
 use Illuminate\Support\Facades\Event;
@@ -17,8 +18,10 @@ use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
 use Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema;
+use Platform\Tenancy\Listeners\RejectBagistoInstallAgainstProtectedDatabase;
 use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
+use Platform\Tenancy\Services\CentralDatabaseWipeGuard;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
 use Stancl\Tenancy\Middleware;
@@ -127,6 +130,15 @@ class TenancyServiceProvider extends ServiceProvider
             MigrationStarted::class => [
                 PreventCentralMigrationOfTenantSchema::class,
             ],
+
+            // INCIDENT-001. Best-effort, real-CLI-usage-only companion to
+            // CentralDatabaseWipeGuard::apply() (called from boot() below) -
+            // see RejectBagistoInstallAgainstProtectedDatabase's own
+            // docblock for why this listener is not, by itself, the tested
+            // guarantee.
+            CommandStarting::class => [
+                RejectBagistoInstallAgainstProtectedDatabase::class,
+            ],
         ];
     }
 
@@ -142,6 +154,13 @@ class TenancyServiceProvider extends ServiceProvider
         $this->attachTenancyToImageCacheRoute();
         $this->makeTenancyMiddlewareHighestPriority();
         $this->registerCommands();
+
+        // INCIDENT-001. Must run before any command's handle() executes -
+        // every provider's boot() runs before the console Kernel dispatches
+        // the requested command, so this ordering holds regardless of
+        // provider registration order. See CentralDatabaseWipeGuard's own
+        // docblock for the full reasoning.
+        CentralDatabaseWipeGuard::apply();
 
         // TASK-ARCH-013/014: the 'tenancy::suspended' and 'tenancy::unavailable'
         // views TenantAccessGate renders for a non-ready tenant's non-JSON

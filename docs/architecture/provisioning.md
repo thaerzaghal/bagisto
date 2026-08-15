@@ -83,3 +83,27 @@ Both are plain, explicit methods — no controller ever sets `$tenant->status` d
 ## Deletion — NOT YET IMPLEMENTED
 
 `DELETING` → `DELETED`: drops the tenant database after (a) an explicit confirmation step and (b) optionally an export/backup step, per the brief's future-scale requirement for tenant export. The exact backup mechanism is out of scope for Phase 0 architecture and should be designed alongside Phase 18 (production deployment) once actual backup infrastructure is chosen. This task remains out of scope — deletion has real, unresolved data-loss/backup-strategy questions no task has answered yet. TASK-ARCH-014 only ensures that if a tenant record already carries `Deleting`/`Deleted` (enum cases that exist today even though nothing transitions a tenant into them yet), traffic fails closed — never that either state is actually reachable through any real workflow yet.
+
+## `bagisto:install` is not a supported workflow (INCIDENT-001)
+
+`php artisan bagisto:install` is Webkul-authored and assumes it owns the
+entire database it targets (`db:wipe` then `migrate:fresh`, unconditionally,
+against whatever the current default connection is). It is **not** a
+supported workflow for this SaaS fork once the central database is real —
+i.e. after initial upstream Bagisto setup. See
+[docs/incidents/INCIDENT-001-central-db-wipe.md](../incidents/INCIDENT-001-central-db-wipe.md)
+for the full incident this caused and RISK_REGISTER.md R44 for the
+safeguard now in place (`Platform\Tenancy\Services\CentralDatabaseWipeGuard`
+statically prohibits `db:wipe`/`migrate:fresh`/`migrate:refresh`/`migrate:reset`
+against the real central database by name, independent of `APP_ENV`).
+
+The supported central bootstrap sequence for this project is:
+
+```
+php artisan platform:migrate:central
+php artisan platform:plans:seed
+php artisan platform:admin:create
+```
+
+Tenant creation/migration always goes through `TenantProvisioner` (above),
+never through `bagisto:install`.

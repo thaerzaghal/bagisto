@@ -549,3 +549,21 @@ Introduces a real, strictly provider-neutral subscription lifecycle domain for e
 **Full `tests/Feature/Platform/` suite, fresh run: 222 passed, 0 failed, 942 assertions.** All 18 files clean. `packages/Webkul/*` remains untouched; no vendor code modified.
 
 **Per explicit instruction, all TASK-ARCH-016 changes remain uncommitted for review — nothing has been committed, pushed, branched, rebased, or merged. Stopping here per instructions. Not starting TASK-ARCH-017 without explicit approval.**
+
+**APPROVED and committed: `f8b935898d888de0a001ab3cd1a10c858153ffd0`.**
+
+## TASK-ARCH-017 — IN PROGRESS, PAUSED (2026-08-15). "CI + Production-Configuration Smoke Test Foundation."
+
+Started (Platform test suite registered as a named `phpunit.xml` testsuite; `.github/workflows/pest_tests.yml` explicitly scoped to preserve existing Webkul suites; `phpunit.smoke.xml` + `tests/Feature/PlatformSmoke/ProductionConfigSmokeTest.php` drafted for the production-config smoke lane) but paused mid-task when local smoke-lane debugging led directly to discovering INCIDENT-001 (below). All TASK-ARCH-017 changes remain uncommitted and untouched pending the incident's resolution and explicit approval to resume. See `.github/workflows/pest_tests.yml`, `phpunit.xml`, `phpunit.smoke.xml`, `tests/Feature/PlatformSmoke/` for the in-progress state.
+
+## INCIDENT-001 — RESOLVED (2026-08-15). "Central database wipe via `bagisto:install`."
+
+A `bagisto:install` invocation intended to target a disposable database instead wiped the real, persistent `bagisto_central` database's tables (`tenants`, `domains`, `plans`, `plan_features`, `platform_users`, `subscriptions`, central `sessions`, plus two unrelated tables). Root cause, blast radius, recovery, and safeguards are fully documented in [docs/incidents/INCIDENT-001-central-db-wipe.md](docs/incidents/INCIDENT-001-central-db-wipe.md) and [RISK_REGISTER.md R44](RISK_REGISTER.md).
+
+**Recovery**: safety backup taken first (full `mysqldump` of the damaged central database plus all 33 surviving databases, verified via a real restore round-trip, stored outside the Docker volume and outside git); central schema rebuilt via `platform:migrate:central` only; `platform:plans:seed` reseeded; all 32 surviving tenant databases confirmed to be disposable test fixtures (no manual/dev tenant existed) so no central registry rows were manually reconstructed, per the task's own guidance to let the test suite recreate disposable fixtures; a new local Platform Admin account created via `platform:admin:create` (password generated randomly, never logged/committed).
+
+**Safeguards added**: `Platform\Tenancy\Services\CentralDatabaseWipeGuard` (new) statically prohibits `db:wipe`/`migrate:fresh`/`migrate:refresh`/`migrate:reset` whenever the current process's default database resolves to the real, fixed `bagisto_central` name — independent of `APP_ENV`, and deliberately not derived from the same overridable config the danger lives in (an initial config-derived design was tautological; see the class's own docblock). Tenant databases and databases prefixed `bagisto_test_`/`bagisto_ci_`/`bagisto_probe_` remain fully wipeable; `migrate:rollback` is deliberately not prohibited (TASK-ARCH-016 already needed it legitimately). A companion `RejectBagistoInstallAgainstProtectedDatabase` listener gives `bagisto:install` a clean rejection message in real CLI usage (confirmed not to fire under Pest/`APP_ENV=testing` — not the tested guarantee). `bagisto:install` is now documented as unsupported for this fork past initial upstream setup (`docs/architecture/provisioning.md`).
+
+**Verification**: 9 new real-MySQL integration tests, `tests/Feature/Platform/CentralDatabaseWipeGuardTest.php`, all passing — proving `db:wipe`/`migrate:fresh`/`bagisto:install` leave `bagisto_central` byte-for-byte unchanged, an explicitly disposable database remains wipeable, and tenant provisioning/`platform:migrate:central` remain fully functional under the guard. `packages/Webkul/*` unmodified throughout.
+
+**Per explicit instruction, all INCIDENT-001 changes remain uncommitted for review. TASK-ARCH-017 remains paused, not resumed without explicit approval.**
