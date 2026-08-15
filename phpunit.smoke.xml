@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    TASK-ARCH-017. Production-configuration smoke lane - a SEPARATE PHPUnit
+    config file from phpunit.xml, not a testsuite inside it, specifically so
+    this file's <php> block can OMIT the SESSION_DRIVER/CACHE_STORE/
+    QUEUE_CONNECTION/RESPONSE_CACHE_ENABLED overrides phpunit.xml applies to
+    every other Platform/Webkul test run. PHPUnit's <env> directives set real
+    OS environment variables before Laravel's own .env loading runs, and
+    PHP's dotenv does not override an already-set env var - this is the exact
+    mechanism that let R29/R33 hide for as long as they did (real production
+    values silently replaced by array/sync/array test defaults). This file
+    exists to make that class of masking structurally impossible for the
+    tests it runs: SESSION_DRIVER/CACHE_STORE/QUEUE_CONNECTION/
+    RESPONSE_CACHE_ENABLED below are EXPLICITLY set to this project's real,
+    documented production-intended values (see .env.example and
+    docs/implementation/ci-testing.md "Production-config smoke lane" for the
+    one deliberate exception - QUEUE_CONNECTION - and why).
+
+    Usage: vendor/bin/pest -c phpunit.smoke.xml
+    (never `vendor/bin/pest tests/Feature/PlatformSmoke` alone - that would
+    run under phpunit.xml's default <php> block instead, silently
+    reintroducing the exact masking this file exists to prevent.)
+-->
+<phpunit
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+    bootstrap="vendor/autoload.php"
+    colors="true"
+>
+    <testsuites>
+        <testsuite name="Platform Production-Config Smoke">
+            <directory suffix="Test.php">tests/Feature/PlatformSmoke</directory>
+        </testsuite>
+    </testsuites>
+
+    <source>
+        <include>
+            <directory>app</directory>
+
+            <directory>packages</directory>
+        </include>
+    </source>
+
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+
+        <!-- The four production-intended values this lane exists to prove -
+             matching .env.example exactly, EXCEPT QUEUE_CONNECTION (see
+             docs/implementation/ci-testing.md for the documented, deliberate
+             exception: .env.example's actual current value is `sync`, a
+             separate, already-recorded deployment decision from
+             TASK-ARCH-006 - `sync` never fires the queue events tenant
+             isolation depends on, so it cannot prove smoke item 6 at all;
+             `redis` is used here specifically to exercise that real,
+             already-supported, already-tested code path, not because
+             .env.example has been changed to redis. -->
+        <env name="SESSION_DRIVER" value="database"/>
+        <env name="CACHE_STORE" value="redis"/>
+        <env name="QUEUE_CONNECTION" value="redis"/>
+        <env name="RESPONSE_CACHE_ENABLED" value="false"/>
+        <env name="REDIS_CLIENT" value="predis"/>
+    </php>
+</phpunit>

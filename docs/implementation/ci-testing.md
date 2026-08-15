@@ -1,0 +1,185 @@
+# Platform CI & Testing (TASK-ARCH-017)
+
+Real implementation record - not a Phase 0 speculative sketch. See
+[testing-strategy.md](testing-strategy.md) for the original Phase 0 plan;
+this document describes what actually exists.
+
+## Local developer commands
+
+```bash
+# Full Platform integration suite (tests/Feature/Platform), default config
+# (CACHE_STORE=array, QUEUE_CONNECTION=sync, SESSION_DRIVER=array - matching
+# every other Pest suite in this repository):
+vendor/bin/pest --testsuite="Platform Feature Test"
+
+# Production-configuration smoke lane - MUST use -c, never run the directory
+# alone (see phpunit.smoke.xml's own docblock for why):
+vendor/bin/pest -c phpunit.smoke.xml
+
+# Confirm suite registration/discovery:
+vendor/bin/pest --list-tests --testsuite="Platform Feature Test" | head
+```
+
+`tests/Feature/Platform` is registered as a real named PHPUnit/Pest suite
+(`phpunit.xml`, "Platform Feature Test") - a bare `vendor/bin/pest` with no
+`--testsuite` filter now includes it by default, closing the gap where
+Platform tests were previously only ever run manually.
+
+## CI lanes
+
+Three lanes across two workflow files, all additive - no pre-existing
+Bagisto/Webkul CI coverage was removed:
+
+| Lane | Workflow | Job | What it proves |
+|---|---|---|---|
+| A. Existing Bagisto tests | `.github/workflows/pest_tests.yml` | `pest_tests` | Unmodified upstream Webkul package suites (Admin/Core/Customer/DataGrid/EUWithdrawal/Installer/PayGlocal/PayU/Razorpay/Shop/Stripe) - unchanged behavior, only its CI database was renamed (see "Safe database naming" below) |
+| B. Platform full integration suite | `.github/workflows/platform_tests.yml` | `platform_tests` | The full `tests/Feature/Platform` suite, default test config |
+| C. Production-config smoke | `.github/workflows/platform_tests.yml` | `platform_smoke_tests` | A small, focused suite proving the golden path survives under this project's real, production-intended config |
+
+## MySQL/Redis dependencies
+
+All three lanes run against real GitHub Actions MySQL 8.0 service
+containers (no mocking of the database). Lane C additionally runs a real
+Redis service container (`redis:alpine`), since it specifically exists to
+prove `CACHE_STORE=redis`/`QUEUE_CONNECTION=redis` work end-to-end - Lane
+A/B's `CACHE_STORE=array` is itself a real, taggable cache store (see
+RISK_REGISTER.md R15), so they don't need Redis to be correct, only Lane C
+does.
+
+## Production-intended configuration (Lane C)
+
+`phpunit.smoke.xml`'s own `<php>` block sets this project's real
+production-intended values, deliberately bypassing `phpunit.xml`'s
+CACHE_STORE=array/QUEUE_CONNECTION=sync/SESSION_DRIVER=array test defaults
+(PHPUnit's `<env>` directives set real OS environment variables before
+Laravel's own `.env` loading runs, and PHP's dotenv does not override an
+already-set variable - this is the exact mechanism that let R29/R33 hide as
+long as they did):
+
+```
+SESSION_DRIVER=database
+CACHE_STORE=redis
+QUEUE_CONNECTION=redis
+RESPONSE_CACHE_ENABLED=false
+REDIS_CLIENT=predis
+```
+
+One deliberate difference from `.env.example`: `QUEUE_CONNECTION` there is
+`sync` (a real TASK-ARCH-006 deployment decision - see
+[queues.md](../architecture/queues.md)) - `sync` never fires the queue
+events tenant isolation depends on, so it cannot prove smoke item 6
+("Redis queue tenant context survives real, asynchronous execution") at
+all. `redis` is used here specifically to exercise that real,
+already-supported, already-tested code path, not because the recommended
+production value has changed.
+
+## Smoke test coverage (`tests/Feature/PlatformSmoke/ProductionConfigSmokeTest.php`)
+
+Nine tests, one per requirement - deliberately small, not a second full
+regression suite:
+
+1. Tenant storefront request returns 200.
+2. Tenant admin login/session works (`SESSION_DRIVER=database`).
+3. Platform Admin login/session works centrally.
+4. Tenant session rows land in the tenant database, never central.
+5. Redis tenant cache isolation holds.
+6. Redis queue tenant context survives real, asynchronous execution.
+7. The tenant access gate still blocks a non-ready tenant before any tenant
+   DB connection is made.
+8. Subscription/Plan "My Plan" basic read path works.
+9. INCIDENT-001's central-database destructive-command safeguard
+   (`Platform\Tenancy\Services\CentralDatabaseWipeGuard`) remains active
+   under this lane's own config - see that test's own docblock for why this
+   check is deliberately environment-agnostic (it asserts the classification
+   rule, not "this lane's own database is protected" - this lane's own
+   database is legitimately disposable and correctly NOT protected).
+
+## Safe database naming (INCIDENT-001, RISK_REGISTER.md R44)
+
+Every CI job's database uses an explicit disposable prefix -
+`bagisto_ci_platform` (Lane B), `bagisto_ci_smoke` (Lane C), and
+`bagisto_ci_pest` (Lane A, renamed from a bare `bagisto` specifically
+because `Platform\Tenancy\Services\CentralDatabaseWipeGuard` treats any
+name that is neither `bagisto_central`, tenant-prefixed, nor
+`bagisto_test_`/`bagisto_ci_`/`bagisto_probe_`-prefixed as unrecognized and
+prohibits `db:wipe`/`migrate:fresh` against it - Lane A's own `bagisto:install`
+step would otherwise have its internal db:wipe/migrate:fresh silently
+no-op). No CI database is ever named `bagisto_central`, and no CI job uses
+real production credentials.
+
+## Why `bagisto:install` is not used for Platform CI
+
+See [docs/incidents/INCIDENT-001-central-db-wipe.md](../incidents/INCIDENT-001-central-db-wipe.md)
+in full. Summary: `bagisto:install`'s own `EnvironmentManager` re-reads
+`.env` directly from disk and rebinds the database connection from those
+file values, bypassing whatever the process's actual environment says -
+this caused a real central-database wipe. Lanes B and C use only the
+supported Platform bootstrap sequence instead:
+
+```
+composer install
+cp .env.example .env && (sed overrides for DB_*/REDIS_* to the disposable
+  service-container values above)
+php artisan key:generate
+php artisan platform:mark-installed
+php artisan platform:migrate:central
+php artisan platform:plans:seed
+vendor/bin/pest ...
+```
+
+No persistent Platform Admin credentials are created in CI - the smoke
+lane's own test file creates its Platform Admin fixture via
+`PlatformUser::firstOrCreate()`, scoped to that test run.
+
+Lane A is the one exception: it still runs `bagisto:install` because it
+predates this SaaS engagement entirely and tests plain upstream Bagisto
+packages, not Platform. Its database is disposable and never
+`bagisto_central`, so this is safe by construction and was left unchanged
+per "preserve existing Bagisto CI coverage."
+
+## Destructive-command safeguards remain active
+
+`Platform\Tenancy\Services\CentralDatabaseWipeGuard` and
+`Platform\Tenancy\Listeners\RejectBagistoInstallAgainstProtectedDatabase`
+are registered unconditionally in `TenancyServiceProvider::boot()` - no CI
+lane disables, bypasses, or special-cases them. Lane C's smoke test 9
+explicitly re-proves the guard's classification rule is intact under that
+lane's own distinct config.
+
+## Parallelism
+
+Both Platform CI lanes run **serially** (no `--parallel`). Lane A's
+existing Webkul suites keep running `--parallel` (unchanged - upstream
+Bagisto's own suites were already parallel-safe before this engagement and
+remain scoped away from the new Platform suite via `--testsuite`).
+
+Platform tests are not proven parallel-safe: they perform real MySQL tenant
+database creation/migration/deletion, dynamically create and grant
+per-tenant MySQL users, and several files deliberately share long-lived
+fixtures (`tenant-a`/`tenant-b`/etc.) across many tests within a file for
+fixture-cost reasons (see `Tests\Feature\Platform\PlatformIntegrationTestCase`'s
+own docblock on why `DatabaseTransactions` is disabled for these files).
+Running two such files' tenant-provisioning/cleanup concurrently against
+the same MySQL server has not been demonstrated safe, and weakening test
+isolation to gain CI speed was explicitly rejected for this task. If
+parallel Platform CI is wanted later, it needs its own dedicated
+feasibility investigation (per-worker database prefixing, fixture
+isolation proof) - not assumed safe by default.
+
+## R34 status
+
+**IMPLEMENTED / PENDING FIRST CI VERIFICATION** - a genuine, automated
+production-config smoke lane exists (Lane C above), runs the real
+production-intended values, and is wired into CI
+(`.github/workflows/platform_tests.yml`), not merely documented. Local YAML
+parsing and local Pest execution prove implementation correctness, but not
+that the actual GitHub Actions environment works - this closes only once a
+real GitHub Actions run on `2.4` completes the `platform_smoke_tests` job
+successfully. See RISK_REGISTER.md.
+
+## CI gap status
+
+**IMPLEMENTED / PENDING FIRST CI VERIFICATION** - `tests/Feature/Platform`
+is wired to run automatically on every push and pull request (Lane B), not
+manually only, but this has not yet been proven against a real GitHub
+Actions run. See RISK_REGISTER.md.

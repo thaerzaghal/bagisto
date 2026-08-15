@@ -1,0 +1,174 @@
+name: Platform Tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+# INCIDENT-001 (RISK_REGISTER.md R44, docs/incidents/INCIDENT-001-central-db-wipe.md).
+# Neither job below ever runs `php artisan bagisto:install`, `migrate`,
+# `migrate:fresh`, or `db:wipe`. Central bootstrap uses only the supported
+# Platform workflow (`platform:migrate:central` + `platform:plans:seed`),
+# and both jobs' MySQL service databases use the disposable
+# `bagisto_ci_*`/`bagisto_test_*`/`bagisto_probe_*` naming convention
+# Platform\Tenancy\Services\CentralDatabaseWipeGuard requires - neither job's
+# database is ever literally `bagisto_central`, so the guard leaves both
+# fully wipeable/migratable by the tests themselves, without ever protecting
+# (or needing to protect) a CI-local database.
+
+jobs:
+  # Lane B: the full Platform integration suite (tests/Feature/Platform),
+  # under this project's default phpunit.xml <php> block (CACHE_STORE=array,
+  # QUEUE_CONNECTION=sync, SESSION_DRIVER=array - matching every other Pest
+  # suite in this repository; the production-INTENDED values are Lane C's
+  # job, not this one's).
+  platform_tests:
+    runs-on: ubuntu-latest
+
+    name: Platform Feature Test suite (PHP 8.3)
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: bagisto_ci_platform
+        ports:
+          - 3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, fileinfo, gd, intl, mbstring, openssl, pdo, pdo_mysql, tokenizer, zip
+          ini-values: error_reporting=E_ALL
+          tools: composer:v2
+
+      - name: Running Composer Install
+        run: composer install
+
+      # Disposable, ephemeral GitHub Actions service container database -
+      # see this file's own top-level comment for why the name must stay
+      # bagisto_ci_-prefixed rather than bagisto_central.
+      - name: Setting Environment
+        run: |
+          cp .env.example .env
+          sed -i "s|^\(APP_ENV=\s*\).*$|\1testing|" .env
+          sed -i "s|^\(DB_HOST=\s*\).*$|\1127.0.0.1|" .env
+          sed -i "s|^\(DB_PORT=\s*\).*$|\1${{ job.services.mysql.ports['3306'] }}|" .env
+          sed -i "s|^\(DB_DATABASE=\s*\).*$|\1bagisto_ci_platform|" .env
+          sed -i "s|^\(DB_USERNAME=\s*\).*$|\1root|" .env
+          sed -i "s|^\(DB_PASSWORD=\s*\).*$|\1root|" .env
+          cat .env
+
+      - name: Generating Application Key
+        run: php artisan key:generate
+
+      # Supported Platform bootstrap sequence only (docs/implementation/ci-testing.md).
+      # Never bagisto:install/migrate/migrate:fresh/db:wipe.
+      - name: Marking Platform As Installed
+        run: php artisan platform:mark-installed
+
+      - name: Running Central Platform Migrations
+        run: php artisan platform:migrate:central
+
+      - name: Seeding Platform Plans
+        run: php artisan platform:plans:seed
+
+      # Deliberately NOT --parallel: real MySQL tenant-database creation/
+      # migration, shared central fixtures, and dynamic per-tenant MySQL
+      # users are not proven parallel-safe (see docs/implementation/
+      # ci-testing.md "Parallelism" and RISK_REGISTER.md). Weakening this
+      # for CI speed was explicitly rejected.
+      - name: Running Platform Feature Test Suite
+        run: vendor/bin/pest --colors=always --testsuite="Platform Feature Test"
+
+  # Lane C: the production-configuration smoke lane - a small, separate
+  # PHPUnit config (phpunit.smoke.xml) whose <php> block sets this project's
+  # actual production-intended values (SESSION_DRIVER=database,
+  # CACHE_STORE=redis, QUEUE_CONNECTION=redis, RESPONSE_CACHE_ENABLED=false)
+  # rather than phpunit.xml's array/sync/array test defaults - the exact
+  # class of masking that let R29/R33 hide (see phpunit.smoke.xml's own
+  # docblock). Needs a real Redis service; Lane B does not.
+  platform_smoke_tests:
+    runs-on: ubuntu-latest
+
+    name: Platform Production-Config Smoke suite (PHP 8.3)
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: bagisto_ci_smoke
+        ports:
+          - 3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379
+        options: --health-cmd="redis-cli ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, fileinfo, gd, intl, mbstring, openssl, pdo, pdo_mysql, tokenizer, zip
+          ini-values: error_reporting=E_ALL
+          tools: composer:v2
+
+      - name: Running Composer Install
+        run: composer install
+
+      # DB_DATABASE/REDIS_HOST/REDIS_PORT are what a normal `php artisan`
+      # invocation (e.g. this job's bootstrap steps below) sees. The actual
+      # production-INTENDED SESSION_DRIVER/CACHE_STORE/QUEUE_CONNECTION/
+      # RESPONSE_CACHE_ENABLED values come from phpunit.smoke.xml's own
+      # <php> block, not from this .env - deliberately, so the bootstrap
+      # steps below (which don't go through PHPUnit) still run against a
+      # disposable, ordinary-config database, and only the smoke TEST
+      # PROCESS itself exercises the production-intended values.
+      - name: Setting Environment
+        run: |
+          cp .env.example .env
+          sed -i "s|^\(APP_ENV=\s*\).*$|\1testing|" .env
+          sed -i "s|^\(DB_HOST=\s*\).*$|\1127.0.0.1|" .env
+          sed -i "s|^\(DB_PORT=\s*\).*$|\1${{ job.services.mysql.ports['3306'] }}|" .env
+          sed -i "s|^\(DB_DATABASE=\s*\).*$|\1bagisto_ci_smoke|" .env
+          sed -i "s|^\(DB_USERNAME=\s*\).*$|\1root|" .env
+          sed -i "s|^\(DB_PASSWORD=\s*\).*$|\1root|" .env
+          sed -i "s|^\(REDIS_HOST=\s*\).*$|\1127.0.0.1|" .env
+          sed -i "s|^\(REDIS_PORT=\s*\).*$|\1${{ job.services.redis.ports['6379'] }}|" .env
+          sed -i "s|^\(REDIS_CLIENT=\s*\).*$|\1predis|" .env
+          cat .env
+
+      - name: Generating Application Key
+        run: php artisan key:generate
+
+      - name: Marking Platform As Installed
+        run: php artisan platform:mark-installed
+
+      - name: Running Central Platform Migrations
+        run: php artisan platform:migrate:central
+
+      - name: Seeding Platform Plans
+        run: php artisan platform:plans:seed
+
+      # phpunit.smoke.xml's own <php> block supplies the production-intended
+      # overrides - this is the only correct way to invoke this lane (see
+      # that file's own docblock for why `vendor/bin/pest tests/Feature/
+      # PlatformSmoke` alone, without `-c phpunit.smoke.xml`, would silently
+      # run under phpunit.xml's array/sync/array test defaults instead).
+      - name: Running Platform Production-Config Smoke Suite
+        run: vendor/bin/pest --colors=always -c phpunit.smoke.xml

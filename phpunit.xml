@@ -76,6 +76,25 @@
         <testsuite name="Stripe Feature Test">
             <directory suffix="Test.php">packages/Webkul/Stripe/tests/Feature</directory>
         </testsuite>
+
+        <!-- TASK-ARCH-017. The SaaS Platform integration suite -
+             tests/Feature/Platform, NOT tests/Feature/PlatformSmoke (a
+             sibling directory, deliberately excluded here - see
+             phpunit.smoke.xml/docs/implementation/ci-testing.md for why
+             smoke tests must never run under this file's CACHE_STORE
+             array / QUEUE_CONNECTION sync / SESSION_DRIVER array
+             overrides below, which would defeat their entire purpose).
+             Registering this suite means a bare "vendor/bin/pest" (no
+             explicit testsuite filter) now includes Platform tests by
+             default - see .github/workflows/pest_tests.yml's own
+             explicit suite scoping for why the EXISTING Webkul-only CI
+             job does not pick this suite up unintentionally under
+             parallel execution (Platform tests are not parallel-safe -
+             shared central fixtures/dynamic tenant database creation -
+             see docs/implementation/ci-testing.md "Parallelism"). -->
+        <testsuite name="Platform Feature Test">
+            <directory suffix="Test.php">tests/Feature/Platform</directory>
+        </testsuite>
     </testsuites>
 
     <source>

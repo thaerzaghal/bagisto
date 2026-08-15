@@ -21,7 +21,7 @@ jobs:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: bagisto
+          MYSQL_DATABASE: bagisto_ci_pest
         ports:
           - 3306
         options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
@@ -41,13 +41,21 @@ jobs:
       - name: Running Composer Install
         run: composer install
 
+      # INCIDENT-001 (RISK_REGISTER.md R44): the database name here MUST stay
+      # prefixed bagisto_ci_/bagisto_test_/bagisto_probe_ - Platform\Tenancy\
+      # Services\CentralDatabaseWipeGuard treats any OTHER name (including
+      # the plain "bagisto" this used before) as unrecognized and prohibits
+      # db:wipe/migrate:fresh against it, which would break the "Running
+      # Bagisto Installer" step below. This job's database is a disposable,
+      # ephemeral GitHub Actions service container regardless of name - the
+      # rename is required only because it is not literally "bagisto_central".
       - name: Setting Environment
         run: |
           cp .env.example .env
           sed -i "s|^\(APP_ENV=\s*\).*$|\1testing|" .env
           sed -i "s|^\(DB_HOST=\s*\).*$|\1127.0.0.1|" .env
           sed -i "s|^\(DB_PORT=\s*\).*$|\1${{ job.services.mysql.ports['3306'] }}|" .env
-          sed -i "s|^\(DB_DATABASE=\s*\).*$|\1bagisto|" .env
+          sed -i "s|^\(DB_DATABASE=\s*\).*$|\1bagisto_ci_pest|" .env
           sed -i "s|^\(DB_USERNAME=\s*\).*$|\1root|" .env
           sed -i "s|^\(DB_PASSWORD=\s*\).*$|\1root|" .env
           cat .env
@@ -55,5 +63,16 @@ jobs:
       - name: Running Bagisto Installer
         run: php artisan bagisto:install --no-interaction
 
+      # TASK-ARCH-017. Explicitly scoped to the pre-existing Webkul package
+      # suites (unchanged from before this task) - NOT a bare `vendor/bin/pest`
+      # invocation. phpunit.xml now also registers a "Platform Feature Test"
+      # suite (tests/Feature/Platform); a bare/unscoped --parallel run here
+      # would silently also attempt to run it, in parallel, against dynamic
+      # tenant-database creation and shared central fixtures that are NOT
+      # parallel-safe (see docs/implementation/ci-testing.md "Parallelism").
+      # Platform tests run in their own dedicated, serial CI job instead -
+      # see .github/workflows/platform_tests.yml.
       - name: Running Pest Test
-        run: vendor/bin/pest --parallel --colors=always
+        run: >-
+          vendor/bin/pest --parallel --colors=always
+          --testsuite="Admin Feature Test,Core Unit Test,Customer Unit Test,DataGrid Unit Test,EUWithdrawal Feature Test,Installer Feature Test,PayGlocal Unit Test,PayGlocal Feature Test,PayU Unit Test,PayU Feature Test,Razorpay Unit Test,Razorpay Feature Test,Shop Feature Test,Stripe Unit Test,Stripe Feature Test"
