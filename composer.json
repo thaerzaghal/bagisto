@@ -72,6 +72,7 @@
             "Platform\\Admin\\": "packages/Platform/Admin/src",
             "Platform\\Enforcement\\": "packages/Platform/Enforcement/src",
             "Platform\\Plans\\": "packages/Platform/Plans/src",
+            "Platform\\Subscriptions\\": "packages/Platform/Subscriptions/src",
             "Platform\\Tenancy\\": "packages/Platform/Tenancy/src",
             "Webkul\\Admin\\": "packages/Webkul/Admin/src",
             "Webkul\\Attribute\\": "packages/Webkul/Attribute/src",

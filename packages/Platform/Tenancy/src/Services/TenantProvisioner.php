@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Platform\Plans\Models\Plan;
-use Platform\Plans\Services\TenantPlanAssignment;
+use Platform\Subscriptions\Services\SubscriptionLifecycle;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use RuntimeException;
@@ -52,7 +52,7 @@ class TenantProvisioner
             $this->ensureFilesystemPrepared($tenant);
             $this->ensureMigrated($tenant);
             $this->ensureSeeded($tenant);
-            $this->ensureDefaultPlanAssigned($tenant);
+            $this->ensureInitialSubscriptionStarted($tenant);
 
             $tenant->forceFill(['status' => TenantStatus::Ready])->save();
         } catch (Throwable $e) {
@@ -200,12 +200,19 @@ class TenantProvisioner
     }
 
     /**
-     * Step 5 (TASK-ARCH-008): assign the tenant its default plan. A
-     * CENTRAL operation (updates the `tenants` row itself), NOT wrapped
-     * in tenant->run() - plan assignment has nothing to do with the
+     * Step 5 (TASK-ARCH-008, rewritten TASK-ARCH-016): start the
+     * tenant's initial subscription on the default plan. A CENTRAL
+     * operation (writes `subscriptions` + `tenants.plan_id`), NOT wrapped
+     * in tenant->run() - none of this has anything to do with the
      * tenant's own database. Idempotent: no-ops if a plan is already
      * assigned (covers both "resuming a partially-provisioned tenant" and
-     * "provision() called again on an already-READY tenant").
+     * "provision() called again on an already-READY tenant") - the
+     * check is deliberately still `tenants.plan_id !== null`, not "does a
+     * Subscription row exist": self-healing a MISSING subscription for an
+     * already-plan_id-assigned tenant is `Platform\Subscriptions\
+     * Services\SubscriptionBackfill`'s job (task section 8), not this
+     * method's - keeping this step narrowly scoped to genuinely NEW
+     * tenants.
      *
      * Looked up by a stable CODE (config('platform.plans.default_code'),
      * default 'free'), never a raw database id - ids are seed-order-
@@ -215,33 +222,38 @@ class TenantProvisioner
      * Platform\Plans\Console\Commands\SeedPlans, which must be run once
      * per environment before any tenant is provisioned.
      *
-     * TASK-ARCH-015: also fails loudly if the configured default plan
-     * exists but has been deactivated via Platform Admin - a deactivated
-     * plan means "not available for new/manual assignment" (see
-     * docs/architecture/feature-limits.md, "Plan deactivation semantics"),
-     * and provisioning a brand-new tenant onto it is exactly that: a NEW
-     * assignment, not an already-existing tenant continuing to use a plan
-     * that was deactivated out from under them (which remains allowed and
-     * unaffected - see Platform\Plans\Services\TenantPlanAssignment's own
-     * docblock). The actual "is this plan assignable" check itself lives
-     * once, in TenantPlanAssignment::assign() - reused here rather than
-     * duplicated, so provisioning-time and platform-admin-time plan
-     * assignment can never silently disagree about what "assignable"
-     * means. This method's own try/catch in provision() (see that method)
-     * already marks the tenant FAILED with last_error on ANY Throwable, so
-     * InactivePlanAssignmentException propagating from here fails
-     * provisioning cleanly by construction, with no separate handling
-     * needed.
+     * TASK-ARCH-016: `SubscriptionLifecycle::start()` (not
+     * `TenantPlanAssignment::assign()` directly, though it still calls
+     * that internally) is now the single entry point - it creates the
+     * tenant's Subscription row (status Active, no trial - a FREE
+     * default tenant gets no trial merely because plans might one day
+     * support a trial_days column that doesn't exist today, task section
+     * 6) AND synchronizes `tenants.plan_id` in one atomic operation, so
+     * "resolve default plan -> create subscription -> tenants.plan_id
+     * synchronized" (task section 7's own sequence) can never partially
+     * apply. TASK-ARCH-015's own active-plan-deactivated failure mode is
+     * unchanged - still fails loudly, still marks the tenant FAILED via
+     * provision()'s existing try/catch, now surfaced through
+     * SubscriptionLifecycle -> TenantPlanAssignment rather than
+     * TenantPlanAssignment directly, no behavior change.
      *
-     * DEPENDENCY-DIRECTION NOTE: this is the one deliberate exception to
-     * Platform\Plans depending on Platform\Tenancy (never the reverse) -
-     * see DECISION_LOG.md. Plan assignment is fundamentally a
-     * provisioning-lifecycle concern (matching this class's existing
-     * responsibility for every other tenant-readiness step), not
-     * business logic Platform\Plans itself needs to know about;
-     * Platform\Plans has zero knowledge of provisioning in return.
+     * DEPENDENCY-DIRECTION NOTE: this is now the SECOND deliberate
+     * exception (after Platform\Plans, DECISION_LOG C19) to the general
+     * rule that Platform\Tenancy is not depended on the other way -
+     * Platform\Tenancy now also depends on Platform\Subscriptions for
+     * this one call. Justified identically to C19: starting a tenant's
+     * initial subscription is fundamentally a provisioning-lifecycle
+     * concern (matching this class's existing responsibility for every
+     * other tenant-readiness step), not business logic Platform\
+     * Subscriptions itself needs to know about; Platform\Subscriptions
+     * has zero knowledge of provisioning in return. An event-listener
+     * alternative was rejected for the same reason C19 already rejected
+     * one for Plan assignment: it would fire on every `Tenant::create()`
+     * call across the whole test suite, forcing every fixture to have
+     * subscription machinery available merely to create a tenant row.
+     * See DECISION_LOG.md.
      */
-    protected function ensureDefaultPlanAssigned(Tenant $tenant): void
+    protected function ensureInitialSubscriptionStarted(Tenant $tenant): void
     {
         if ($tenant->plan_id !== null) {
             return;
@@ -256,6 +268,6 @@ class TenantProvisioner
             );
         }
 
-        app(TenantPlanAssignment::class)->assign($tenant, $plan);
+        app(SubscriptionLifecycle::class)->start($tenant, $plan);
     }
 }

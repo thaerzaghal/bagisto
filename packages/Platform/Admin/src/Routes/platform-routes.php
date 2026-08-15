@@ -7,6 +7,7 @@ use Platform\Admin\Http\Controllers\DashboardController;
 use Platform\Admin\Http\Controllers\PlanController;
 use Platform\Admin\Http\Controllers\PlanFeatureController;
 use Platform\Admin\Http\Controllers\SessionController;
+use Platform\Admin\Http\Controllers\SubscriptionController;
 use Platform\Admin\Http\Controllers\TenantController;
 use Platform\Admin\Http\Middleware\Authenticate;
 use Platform\Admin\Http\Middleware\EnsureCentralDomain;
@@ -43,6 +44,11 @@ Route::middleware([EnsureCentralDomain::class, 'platform'])
             Route::post('tenants/{tenant}/suspend', [TenantController::class, 'suspend'])->name('tenants.suspend');
             Route::post('tenants/{tenant}/reactivate', [TenantController::class, 'reactivate'])->name('tenants.reactivate');
             Route::post('tenants/{tenant}/change-plan', [TenantController::class, 'changePlan'])->name('tenants.change-plan');
+
+            // TASK-ARCH-016.
+            Route::post('tenants/{tenant}/subscription/activate', [SubscriptionController::class, 'activate'])->name('tenants.subscription.activate');
+            Route::post('tenants/{tenant}/subscription/cancel-at-period-end', [SubscriptionController::class, 'cancelAtPeriodEnd'])->name('tenants.subscription.cancel-at-period-end');
+            Route::post('tenants/{tenant}/subscription/cancel-immediately', [SubscriptionController::class, 'cancelImmediately'])->name('tenants.subscription.cancel-immediately');
 
             // TASK-ARCH-015. GET routes ('plans.index'/'plans.create'/
             // 'plans.show') must be declared before 'plans/{plan}' would

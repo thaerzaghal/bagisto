@@ -9,7 +9,10 @@ use Illuminate\Http\Request;
 use Illuminate\View\View;
 use Platform\Plans\Exceptions\InactivePlanAssignmentException;
 use Platform\Plans\Models\Plan;
-use Platform\Plans\Services\TenantPlanAssignment;
+use Platform\Subscriptions\Enums\SubscriptionStatus;
+use Platform\Subscriptions\Exceptions\InvalidSubscriptionTransitionException;
+use Platform\Subscriptions\Models\Subscription;
+use Platform\Subscriptions\Services\SubscriptionLifecycle;
 use Platform\Tenancy\Exceptions\InvalidTenantTransitionException;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Services\TenantLifecycle;
@@ -31,11 +34,20 @@ use Throwable;
  * any number of times, TASK-ARCH-010/R33) - and, since TASK-ARCH-013,
  * suspend()/reactivate() via `Platform\Tenancy\Services\TenantLifecycle`
  * (Ready<->Suspended only; the controller itself never mutates
- * `$tenant->status` directly) and, since TASK-ARCH-015, changePlan() via
- * `Platform\Plans\Services\TenantPlanAssignment` (the controller itself
- * never mutates `$tenant->plan_id` directly either). Still no delete -
- * deletion has its own unresolved backup/export design questions and
- * remains out of scope.
+ * `$tenant->status` directly). Still no delete - deletion has its own
+ * unresolved backup/export design questions and remains out of scope.
+ *
+ * TASK-ARCH-016: changePlan() no longer mutates `$tenant->plan_id` (or
+ * even calls `TenantPlanAssignment` directly, TASK-ARCH-015's own
+ * approach) - it now goes through `Platform\Subscriptions\Services\
+ * SubscriptionLifecycle`, which itself calls `TenantPlanAssignment`
+ * internally. Task section 10, explicit: "This can no longer remain an
+ * independent mutation path once subscriptions exist... Do NOT allow
+ * Platform Admin to bypass Subscription once a tenant has one." See
+ * changePlan()'s own docblock for the narrow, temporary compatibility
+ * path for a tenant with no subscription row yet (should not occur for
+ * any tenant provisioned after this task, or after the backfill migration
+ * - see docs/architecture/subscriptions.md).
  */
 class TenantController
 {
@@ -60,6 +72,7 @@ class TenantController
         return view('platform::tenants.show', [
             'tenant' => $tenant->load('domains'),
             'plan' => $plan,
+            'subscription' => Subscription::currentFor($tenant),
             // TASK-ARCH-015: only ACTIVE plans are offered for manual
             // (re)assignment - see TenantPlanAssignment's own "assignable"
             // rule. The tenant's CURRENT plan is included even if it has
@@ -75,26 +88,27 @@ class TenantController
     }
 
     /**
-     * Deliberately does NOT use a plain `'plan_id' => 'exists:plans,id'`
-     * validation rule: Laravel's `exists:` rule queries the given TABLE
-     * NAME against whatever the ambient "default" database connection
-     * currently is - it has no awareness that `plans` is central-only
-     * (`Platform\Plans\Models\Plan`'s `CentralConnection` trait is a
-     * model-level concern the raw string-based rule never sees). If this
-     * action is ever reached while some earlier, unrelated code in the
-     * same PHP process left tenancy initialized (a real, if unusual,
-     * possibility this project has hit before in test harnesses - see
-     * RISK_REGISTER.md R35/R37 - and one Platform Admin's own middleware
-     * group cannot itself rule out, since it only guarantees it never
-     * INITIATES tenancy, not that it reverts an already-active one), the
-     * `exists:` rule would incorrectly query the TENANT connection and
-     * fail with a raw `QueryException` for a table that doesn't exist
-     * there. `Plan::find()` has no such gap - it always resolves against
-     * the central connection regardless of ambient state, the same
-     * guarantee every other Plan/PlanFeature read in this codebase already
-     * relies on.
+     * TASK-ARCH-016: routes through `SubscriptionLifecycle` rather than
+     * mutating a plan directly (see class docblock). Two cases:
+     *
+     * - The tenant already has a Trialing/Active subscription (the normal
+     *   case for every real tenant after this task) -> `changePlan()`.
+     * - The tenant has no subscription, or an already-Canceled/Expired
+     *   one (the "narrow, temporary compatibility" case the task
+     *   explicitly permits for a transitional tenant-without-subscription
+     *   state, task section 10) -> `start()`, which both creates/restarts
+     *   the subscription AND assigns the plan in one step - the exact
+     *   fallback `SubscriptionLifecycle::start()`'s own docblock already
+     *   documents ("RESTART IN PLACE").
+     *
+     * Still does NOT use a plain `'plan_id' => 'exists:plans,id'`
+     * validation rule - see RISK_REGISTER.md R42 (TASK-ARCH-015): that
+     * rule queries the given table name against whatever the ambient
+     * default DB connection is, with no awareness `plans` is central-
+     * only. `Plan::find()` is `CentralConnection`-safe regardless of
+     * ambient state.
      */
-    public function changePlan(Request $request, Tenant $tenant, TenantPlanAssignment $assignment): RedirectResponse
+    public function changePlan(Request $request, Tenant $tenant, SubscriptionLifecycle $lifecycle): RedirectResponse
     {
         $validated = $request->validate([
             'plan_id' => ['required', 'integer'],
@@ -106,9 +120,15 @@ class TenantController
             return back()->withErrors(['plan' => "Plan [{$validated['plan_id']}] does not exist."]);
         }
 
+        $subscription = Subscription::currentFor($tenant);
+
         try {
-            $assignment->assign($tenant, $plan);
-        } catch (InactivePlanAssignmentException $e) {
+            if ($subscription && in_array($subscription->status, [SubscriptionStatus::Trialing, SubscriptionStatus::Active], true)) {
+                $lifecycle->changePlan($subscription, $plan);
+            } else {
+                $lifecycle->start($tenant, $plan);
+            }
+        } catch (InactivePlanAssignmentException|InvalidSubscriptionTransitionException $e) {
             return back()->withErrors(['plan' => $e->getMessage()]);
         }
 

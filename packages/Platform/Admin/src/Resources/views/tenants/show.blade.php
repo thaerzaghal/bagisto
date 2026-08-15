@@ -43,6 +43,58 @@
         @endif
     </p>
 
+    <div class="card" style="margin-top: 1.5rem; max-width: 480px;">
+        <h2 style="margin-top: 0;">Subscription</h2>
+
+        @if ($subscription)
+            <table>
+                <tr><th>Status</th><td><span class="status status-{{ $subscription->status->value === 'active' ? 'ready' : ($subscription->status->value === 'canceled' || $subscription->status->value === 'expired' ? 'suspended' : 'pending') }}">{{ $subscription->status->value }}</span></td></tr>
+                <tr><th>Plan</th><td>{{ $subscription->plan->name }}</td></tr>
+                <tr><th>Starts at</th><td>{{ $subscription->starts_at }}</td></tr>
+                @if ($subscription->trial_ends_at)
+                    <tr><th>Trial ends at</th><td>{{ $subscription->trial_ends_at }}</td></tr>
+                @endif
+                @if ($subscription->current_period_start || $subscription->current_period_end)
+                    <tr><th>Current period</th><td>{{ $subscription->current_period_start }} &rarr; {{ $subscription->current_period_end }}</td></tr>
+                @endif
+                <tr><th>Cancel at period end</th><td>{{ $subscription->cancel_at_period_end ? 'Yes' : 'No' }}</td></tr>
+                @if ($subscription->cancelled_at)
+                    <tr><th>Cancelled at</th><td>{{ $subscription->cancelled_at }}</td></tr>
+                @endif
+                @if ($subscription->ended_at)
+                    <tr><th>Ended at</th><td>{{ $subscription->ended_at }}</td></tr>
+                @endif
+            </table>
+
+            <p style="margin-top: 1rem;">
+                @if ($subscription->status === \Platform\Subscriptions\Enums\SubscriptionStatus::Trialing)
+                    <form class="inline" method="POST" action="{{ route('platform.tenants.subscription.activate', $tenant->getTenantKey()) }}">
+                        @csrf
+                        <button type="submit">Activate</button>
+                    </form>
+                @endif
+
+                @if ($subscription->status === \Platform\Subscriptions\Enums\SubscriptionStatus::Active)
+                    @unless ($subscription->cancel_at_period_end)
+                        <form class="inline" method="POST" action="{{ route('platform.tenants.subscription.cancel-at-period-end', $tenant->getTenantKey()) }}" onsubmit="return confirm('Schedule this subscription to cancel at period end? The tenant keeps access until then - this only sets intent.');">
+                            @csrf
+                            <button type="submit">Cancel at period end</button>
+                        </form>
+                    @endunless
+                @endif
+
+                @if (in_array($subscription->status, [\Platform\Subscriptions\Enums\SubscriptionStatus::Trialing, \Platform\Subscriptions\Enums\SubscriptionStatus::Active], true))
+                    <form class="inline" method="POST" action="{{ route('platform.tenants.subscription.cancel-immediately', $tenant->getTenantKey()) }}" onsubmit="return confirm('Cancel this subscription immediately? This does not change the tenant\'s access/plan/status on its own - those are separate, independent decisions.');">
+                        @csrf
+                        <button type="submit">Cancel immediately</button>
+                    </form>
+                @endif
+            </p>
+        @else
+            <p>No subscription yet.</p>
+        @endif
+    </div>
+
     <div class="card" style="margin-top: 1.5rem; max-width: 420px;">
         <h2 style="margin-top: 0;">Change Plan</h2>
 
@@ -59,5 +111,6 @@
 
             <button type="submit">Change Plan</button>
         </form>
+        <p><small>{{ $subscription ? 'Changes the tenant\'s subscription plan.' : 'No subscription exists yet - this will start one.' }}</small></p>
     </div>
 @endsection

@@ -90,5 +90,55 @@
                 @endif
             </x-slot>
         </x-admin::accordion>
+
+        @if ($subscription)
+            <x-admin::accordion class="mt-4">
+                <x-slot:header>
+                    <div class="flex items-center gap-2.5">
+                        <p class="text-base font-semibold text-gray-800 dark:text-white">
+                            Subscription
+                        </p>
+                    </div>
+                </x-slot>
+
+                <x-slot:content>
+                    <div class="grid grid-cols-2 gap-4 p-2 sm:grid-cols-3">
+                        <div>
+                            <p class="text-xs text-gray-500 dark:text-gray-400">Status</p>
+                            <p class="text-base font-medium text-gray-800 dark:text-white">
+                                {{ ucfirst($subscription->status->value) }}
+                            </p>
+                        </div>
+
+                        @if ($subscription->status === \Platform\Subscriptions\Enums\SubscriptionStatus::Trialing && $subscription->trial_ends_at)
+                            <div>
+                                <p class="text-xs text-gray-500 dark:text-gray-400">Trial ends</p>
+                                <p class="text-base font-medium text-gray-800 dark:text-white">
+                                    {{ $subscription->trial_ends_at->toFormattedDateString() }}
+                                </p>
+                            </div>
+                        @endif
+
+                        @if ($subscription->current_period_start && $subscription->current_period_end)
+                            <div>
+                                <p class="text-xs text-gray-500 dark:text-gray-400">Current period</p>
+                                <p class="text-base font-medium text-gray-800 dark:text-white">
+                                    {{ $subscription->current_period_start->toFormattedDateString() }} &rarr; {{ $subscription->current_period_end->toFormattedDateString() }}
+                                </p>
+                            </div>
+                        @endif
+
+                        @if ($subscription->cancel_at_period_end)
+                            <div>
+                                <p class="text-xs text-gray-500 dark:text-gray-400">Cancellation</p>
+                                <p class="text-base font-medium text-gray-800 dark:text-white">
+                                    Scheduled to cancel at period end
+                                </p>
+                            </div>
+                        @endif
+                    </div>
+                </x-slot>
+            </x-admin::accordion>
+        @endif
     @endif
 </x-admin::layouts>

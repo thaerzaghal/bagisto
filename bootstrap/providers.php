@@ -4,6 +4,7 @@ use App\Providers\AppServiceProvider;
 use Platform\Admin\Providers\PlatformAdminServiceProvider;
 use Platform\Enforcement\Providers\EnforcementServiceProvider;
 use Platform\Plans\Providers\PlansServiceProvider;
+use Platform\Subscriptions\Providers\SubscriptionsServiceProvider;
 use Platform\Tenancy\Providers\TenancyServiceProvider;
 use Webkul\Admin\Providers\AdminServiceProvider;
 use Webkul\Attribute\Providers\AttributeServiceProvider;
@@ -69,6 +70,17 @@ return [
      * (registers only a console command, no listeners/middleware/routes).
      */
     PlansServiceProvider::class,
+
+    /**
+     * TASK-ARCH-016: the provider-agnostic subscription lifecycle domain
+     * (Platform\Subscriptions\Services\SubscriptionLifecycle) - depends on
+     * Platform\Plans (registered above) and Platform\Tenancy (registered
+     * above that), so registered after both. Registers no listeners/
+     * middleware/routes of its own - `Platform\Tenancy\Services\
+     * TenantProvisioner` and `Platform\Admin`'s controllers call into it
+     * directly. See docs/architecture/subscriptions.md.
+     */
+    SubscriptionsServiceProvider::class,
 
     /**
      * TASK-ARCH-011: the CENTRAL Platform Admin area (tenants/plans/

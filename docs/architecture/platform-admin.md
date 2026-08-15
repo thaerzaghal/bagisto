@@ -130,6 +130,9 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
 | POST   | `/platform/plans/{plan}/features`       | `platform.plans.features.store`   | `platform` |
 | PATCH  | `/platform/plans/{plan}/features/{feature}` | `platform.plans.features.update` | `platform` |
 | DELETE | `/platform/plans/{plan}/features/{feature}` | `platform.plans.features.destroy` | `platform` |
+| POST   | `/platform/tenants/{tenant}/subscription/activate` | `platform.tenants.subscription.activate` | `platform` |
+| POST   | `/platform/tenants/{tenant}/subscription/cancel-at-period-end` | `platform.tenants.subscription.cancel-at-period-end` | `platform` |
+| POST   | `/platform/tenants/{tenant}/subscription/cancel-immediately` | `platform.tenants.subscription.cancel-immediately` | `platform` |
 
 ## Pages
 
@@ -143,8 +146,12 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
 - **Tenant detail**: the same fields plus updated timestamp, plus (since
   TASK-ARCH-015) a "Change Plan" form offering every currently ACTIVE plan
   plus the tenant's own current plan even if it has since been
-  deactivated. No subscription/billing section (out of scope, no such
-  data exists yet).
+  deactivated, plus (since TASK-ARCH-016) a "Subscription" card - status,
+  plan, `starts_at`, `trial_ends_at`, current period, `cancel_at_period_end`,
+  `cancelled_at`/`ended_at` where relevant, with conditional action
+  buttons matching the subscription's current status. No billing/payment
+  section (out of scope, no such data exists - see
+  docs/architecture/subscriptions.md).
 - **Plan list**: code, name, active flag, sort order, configured feature
   count (`Plan::withCount('features')`), each code linking to its detail
   page (TASK-ARCH-015). No pricing/billing fields — `plans`/`plan_features`
@@ -177,16 +184,27 @@ All under prefix `platform`, group middleware `[EnsureCentralDomain,
   docs/architecture/provisioning.md "Suspension and reactivation" for the
   full lifecycle design and docs/architecture/domain-routing.md for how
   enforcement actually rejects a suspended tenant's requests.
-- **Change Plan** (`platform.tenants.change-plan`, TASK-ARCH-015) — calls
-  `Platform\Plans\Services\TenantPlanAssignment::assign()`; only an
-  ACTIVE plan may be selected in the dropdown (an inactive plan is
-  rejected server-side too, not just hidden from the UI). Immediate
-  effect on the next enforcement check - see
+- **Change Plan** (`platform.tenants.change-plan`) — since TASK-ARCH-016,
+  routes through `Platform\Subscriptions\Services\SubscriptionLifecycle::
+  changePlan()` (or `start()` for a tenant with no subscription yet - a
+  narrow, temporary compatibility path), which itself calls
+  `TenantPlanAssignment::assign()` internally; only an ACTIVE plan may be
+  selected in the dropdown (an inactive plan is rejected server-side too,
+  not just hidden from the UI). Immediate effect on the next enforcement
+  check - see docs/architecture/subscriptions.md and
   docs/architecture/feature-limits.md "Plan management".
 - **Create / edit / activate / deactivate a plan, add / edit / remove a
   plan feature** (TASK-ARCH-015) — see docs/architecture/feature-limits.md
   "Plan management" for the full CRUD design, plan code immutability
   policy, deactivation semantics, and duplicate-feature/type validation.
+- **Activate / cancel at period end / cancel immediately** (TASK-ARCH-016,
+  `platform.tenants.subscription.*`) — call
+  `Platform\Subscriptions\Services\SubscriptionLifecycle`'s matching
+  transition methods; visible only when the subscription's current status
+  makes that transition valid (mirroring the suspend/reactivate
+  conditional-button pattern above). Canceling a subscription never
+  suspends the tenant or changes its plan - see
+  docs/architecture/subscriptions.md "TenantStatus independence".
 
 Still no delete for either tenants or plans — tenant deletion requires a
 fully-defined backup/export lifecycle this task does not build
