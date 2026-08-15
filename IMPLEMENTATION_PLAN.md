@@ -88,7 +88,7 @@ Objective: `stancl/tenancy`'s `FilesystemTenancyBootstrapper`, addressing R5.
 Acceptance criteria: MVP criteria #11.
 
 ## PHASE 13 — Cache Isolation
-Objective: addresses R1, R2, R3 — the highest-severity risks in the register. Requires HUMAN DECISION REQUIRED item 1 (cache store) resolved first.
+Objective: addresses R1, R2, R3 — the highest-severity risks in the register. Cache-store choice (Redis) is RESOLVED (DECISION_LOG C36, TASK-ARCH-015B) — was the original prerequisite for this phase, no longer a blocker. R2/R3 resolved via TASK-ARCH-004 (see that section below); R1's config-level exposure closed (TASK-ARCH-015B), but tenant-safe full-page response caching itself remains unbuilt/deferred.
 Acceptance criteria: MVP criteria #12; automated test proving R1/R2/R3 cannot reproduce.
 
 ## PHASE 14 — Queue/Job Isolation
@@ -503,3 +503,17 @@ Extends Platform Admin so the plan/feature-definition/tenant-assignment domain (
 **Full `tests/Feature/Platform/` suite, fresh run: 197 passed, 0 failed, 846 assertions.** All 19 files clean. `packages/Webkul/*` remains untouched; no vendor code modified.
 
 **Per explicit instruction, all TASK-ARCH-015 changes remain uncommitted for review — nothing has been committed, pushed, branched, rebased, or merged. Stopping here per instructions. Not starting TASK-ARCH-016 without explicit approval.**
+
+## TASK-ARCH-015B — COMPLETE (2026-08-15). "Configuration Decision Reconciliation."
+
+A small, scoped configuration/documentation reconciliation, done between the roadmap review preceding TASK-ARCH-016 and TASK-ARCH-016 itself — no application code changed, no migrations, no tests required (none modified anything runtime-behavioral).
+
+**Decision 1 — production cache store is Redis, RESOLVED**: `.env.example`'s `CACHE_STORE=redis` (in place since TASK-ARCH-004) is now explicitly accepted, not merely "the production recommendation" sitting alongside an open decision. DECISION_LOG.md's "HUMAN DECISION REQUIRED" item 1 is struck through and marked resolved (new decision C36) rather than removed/renumbered, so existing "DECISION_LOG item 2/3" cross-references in `docs/architecture/{billing,database-per-tenant,domain-routing}.md` stay correct without needing their own edits. Explicitly does **not** mean Redis infrastructure is provisioned by this repository — that remains a Phase 18 concern, stated explicitly in C36.
+
+**Decision 2 — full-page response caching stays disabled by default**: found during the roadmap review that `.env.example` still shipped Bagisto's stock `RESPONSE_CACHE_ENABLED=true`, contradicting DECISION_LOG C15's already-recorded decision ("disabled by default for the SaaS build until tenant-scoped cache keys are verified end-to-end") - a fresh deployment following the documented template would have silently reintroduced the exact R1 cross-tenant leak risk C15 was written to prevent. Fixed: `.env.example` now has `RESPONSE_CACHE_ENABLED=false`, with an inline comment (matching the existing `CACHE_STORE` comment's style) explaining why and what would need to happen before it's ever flipped back. RISK_REGISTER.md R1 updated to record the config-level exposure as closed while explicitly keeping the underlying gap open: `Webkul\FPC\Hasher\DefaultHasher`'s cache-key derivation has still never been audited/tested for tenant-safety - re-verifying that remains a real, separate, not-yet-scheduled task.
+
+**No application/runtime code changed** - `docs/architecture/caching.md` needed no edit (already correctly described Redis as the shipped default, never framed it as an open decision). `packages/Webkul/*` untouched. `.env` remains untracked.
+
+**Full `tests/Feature/Platform/` suite**: not re-run, per instruction - this task modified only `.env.example`/`DECISION_LOG.md`/`RISK_REGISTER.md`/`IMPLEMENTATION_PLAN.md`, none of which affect runtime application behavior.
+
+**Per explicit instruction, all TASK-ARCH-015B changes remain uncommitted for review — nothing has been committed, pushed, branched, rebased, or merged. Stopping here per instructions. Not starting TASK-ARCH-016 without explicit approval.**
