@@ -25,4 +25,37 @@ return [
 
     ],
 
+    /**
+     * TASK-MVP-001. The root domain self-service signup builds tenant
+     * subdomains under (`{slug}.{base_domain}`). Local/dev default only -
+     * the real production value is a TASK-MVP-004 concern (real domain,
+     * SSL, `tenancy.central_domains`), deliberately not decided here.
+     */
+    'base_domain' => env('PLATFORM_BASE_DOMAIN', 'platform.test'),
+
+    'signup' => [
+
+        /**
+         * TASK-MVP-001. Slugs a merchant may not claim as their own store
+         * address, checked in addition to (never instead of) the
+         * database-level uniqueness check against existing tenants. Kept
+         * here, centrally configurable, rather than hardcoded inside
+         * Platform\Signup's own validation logic - `config('tenancy.
+         * central_domains')` is merged in at the point of use too (a
+         * slug identical to a configured central domain must also be
+         * rejected), so this list only needs genuinely platform-specific
+         * reserved words, not every central domain by hand.
+         */
+        'reserved_slugs' => [
+            'www',
+            'admin',
+            'api',
+            'platform',
+            'app',
+            'mail',
+            'central',
+        ],
+
+    ],
+
 ];

@@ -37,6 +37,13 @@ use Stancl\Tenancy\Database\Models\Tenant as BaseTenant;
  *                this lives directly on `tenants` rather than a separate
  *                assignment table, and how it evolves once Phase 10
  *                subscriptions exist.
+ * - owner_name / owner_email (nullable, TASK-MVP-001) the self-service
+ *                merchant who registered this tenant, if any (CLI/Platform
+ *                Admin-provisioned tenants have neither). Central-only
+ *                contact/uniqueness metadata - NOT a second authentication
+ *                system; the merchant's real login remains a
+ *                `Webkul\User\Models\Admin` row inside their own tenant
+ *                database. `owner_email` is unique platform-wide.
  * - data         (json, inherited from stancl's base Tenant) stores every
  *                other attribute not backed by a real column, including
  *                stancl's own internal db_name/db_username/db_password keys
@@ -79,10 +86,14 @@ class Tenant extends BaseTenant implements TenantWithDatabase
      * HasInternalKeys) are NOT added here - those are deliberately
      * data-blob-only by stancl's own design, unaffected by this fix. See
      * RISK_REGISTER.md R31.
+     *
+     * TASK-MVP-001: `owner_name`/`owner_email` added the moment they were
+     * introduced as real columns, deliberately avoiding a second instance
+     * of the exact R31 bug this docblock describes.
      */
     public static function getCustomColumns(): array
     {
-        return ['id', 'status', 'last_error', 'plan_id'];
+        return ['id', 'status', 'last_error', 'plan_id', 'owner_name', 'owner_email'];
     }
 
     protected function casts(): array

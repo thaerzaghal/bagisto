@@ -673,3 +673,37 @@ Attempted and completed as ONE coherent task (not split, per section 33's own fa
 **Not implemented, deliberately deferred**: `billing_accounts`, refund execution (status only), tenant self-service cancellation/downgrade, invoices, automatic renewal, failed-payment suspension policy, live Stripe sandbox E2E (no real credentials configured in this environment - deterministic test coverage is the required and sufficient bar per the task's own explicit instruction).
 
 **Per explicit instruction, all TASK-ARCH-019 changes remain uncommitted for review. Do NOT start TASK-ARCH-020.**
+
+**APPROVED and committed: `f7c0ab74f2e5b6a4c80efb6b17049a77ccb0ac25`.**
+
+## TASK-MVP-001 — Merchant Self-Service Signup & Automatic Provisioning (2026-08-16).
+
+The transition point from architecture/foundation work to MVP delivery, per a fresh, evidence-based roadmap review (see `PROJECT_CONTEXT.md`, committed `8e1454372c2ddd70d29aa7edae68fbb66003d59c`) that identified this as the single largest gap between "architecturally complete" and "a merchant can actually use this" - the only way a tenant existed before this task was `tenant:provision` on the CLI, or Platform Admin re-provisioning an already-existing row.
+
+**New package**: `packages/Platform/Signup`, depending ONLY on `Platform\Tenancy` (DECISION_LOG C52) - `MerchantOnboarding` (the one entry point for both a fresh registration and a retry), `SignupController`/`SignupRetryController`, a small dedicated `EnsureCentralDomain` middleware (deliberately duplicated rather than importing `Platform\Admin`'s own, DECISION_LOG C56).
+
+**`TenantProvisioner::provision()` extended, not duplicated (DECISION_LOG C53)**: gained an optional `$ownerAdmin` parameter (`['name', 'email', 'password']`) and a new final idempotent step, `ensureOwnerAdminSeeded()`, which overwrites the seeded placeholder admin (`admin@example.com`/`admin123`, identical across every tenant provisioned by any path until now) with the merchant's real, self-chosen identity - hashed via `Hash::make()` at the point of use, a plain `DB::table('admins')->update()` (no new `Webkul\User` dependency). Every existing caller (CLI, Platform Admin) passes nothing and is unaffected.
+
+**Schema**: `tenants.owner_name`/`owner_email` (nullable, `owner_email` unique platform-wide) - added to `Tenant::getCustomColumns()` in the same change, deliberately avoiding a second instance of the R31 VirtualColumn bug.
+
+**Tenant `id` IS the merchant-chosen slug (DECISION_LOG C54)** - validated against `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (3-32 chars) before it ever reaches `Tenant::create()` or the physical database name, closing RISK_REGISTER.md R19 at the input boundary (the first tenant-creation path in this codebase driven by real untrusted input). Also checked against `config('platform.signup.reserved_slugs')` (kept centrally configurable, merged with `config('tenancy.central_domains')`) and existing `Tenant`/`Domain` rows via model-based queries (never a bare `unique:`/`exists:` string-table rule - the R42 lesson, applied from the start).
+
+**Synchronous provisioning (approved plan decision 2)** - no queue, no polling, matching Platform Admin's own provision button exactly; the operational cost (a blocking signup POST) is accepted for MVP and flagged explicitly for TASK-MVP-004 (reverse proxy/PHP-FPM timeout must be raised for this one route in production - not weakened globally).
+
+**Retry authorization - the required security adjustment (DECISION_LOG C55)**: never "knowledge of the tenant slug" (public information). Both `GET`/`POST /join/retry/{tenant}` require Laravel's `signed` middleware - a cryptographically signed, 24-hour URL that exists only because it was rendered on the merchant's own failed-signup response page. The retry form always asks the merchant to re-enter their password; the plaintext password is never persisted anywhere (not `tenants`, not `data`, not cache, not logs, not even session) - it lives only in the PHP call stack of the single request that supplied it. `provision()`'s pre-existing `if (status === Ready) return;` makes a stale/reused signed link against an already-Ready tenant a safe no-op by construction.
+
+**Rate limiting**: `throttle:6,1` on the signup POST, `throttle:10,1` on the retry POST - each successful submission creates a real MySQL database, a genuine resource-exhaustion control.
+
+**Plan/subscription unchanged**: every self-registered tenant starts on `config('platform.plans.default_code')`, Active, no trial, through the exact same `SubscriptionLifecycle::start()` call already made before this task. No plan selection at signup (explicit scope decision, approved) - upgrading uses the already-built TASK-ARCH-019 checkout flow.
+
+**Known, documented limitation**: if a merchant loses their one-time retry link (no email delivery exists in this MVP), a Platform-Admin-triggered resume completes provisioning but cannot know the merchant's chosen credentials, leaving the default seeded admin in place - an operator would need a separate, not-yet-built credential-reset mechanism. Accepted for MVP given the constraint against persisting plaintext passwords anywhere.
+
+**16 new tests**, `tests/Feature/Platform/PlatformSignupTest.php` (real MySQL, real provisioning, real Bagisto tenant Admin logins, nothing mocked): signup form reachability; full Tenant+Domain+real-database+default-plan+Active-subscription creation ending in a redirect to the real tenant admin login; the merchant-selected admin identity replacing the generic seeded one, proven via a REAL login through the unmodified Bagisto tenant Admin flow; duplicate slug/owner-email rejected before any provisioning side effect; seven malicious/invalid slug cases (including a literal backtick) rejected with zero database created; a forced provisioning failure (via a temporarily-misconfigured default plan code, not the now-blocked backtick trick) followed by an unsigned-retry-link rejection (403) and a successful, idempotent recovery via the actual signed link the failure page rendered; no plaintext password anywhere in the central `tenants`/`domains` rows; signup never initializing tenancy or touching the `tenant` connection (`DB::listen()` proof); rate limiting.
+
+**Full Platform suite, DB migrations verified central-only**: `tenants.owner_name`/`owner_email` confirmed central-only (no tenant database migration added). No `packages/Webkul` modification. No `Platform\Plans`/`Platform\Subscriptions`/`Platform\Billing`/`Platform\Admin` runtime code touched.
+
+**Documentation**: `docs/architecture/provisioning.md` (new "Merchant self-service signup - IMPLEMENTED" section, reconciling Phase 0's original speculative steps 1/10 with the real implementation); `DECISION_LOG.md` (C52-C56); `RISK_REGISTER.md` (R19 closed).
+
+**Proposed TASK-MVP-002 scope** (not started): Storefront Shopper Order End-to-End Verification, per `PROJECT_CONTEXT.md`'s own roadmap - a real Pest test (and any fixes it surfaces) proving browse → cart → checkout → order-placed on a tenant storefront, since no test in this entire engagement has ever driven that flow end-to-end.
+
+**Per explicit instruction, all TASK-MVP-001 changes remain uncommitted for review. Do NOT start TASK-MVP-002.**

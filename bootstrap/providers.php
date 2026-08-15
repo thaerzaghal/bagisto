@@ -5,6 +5,7 @@ use Platform\Admin\Providers\PlatformAdminServiceProvider;
 use Platform\Billing\Providers\BillingServiceProvider;
 use Platform\Enforcement\Providers\EnforcementServiceProvider;
 use Platform\Plans\Providers\PlansServiceProvider;
+use Platform\Signup\Providers\SignupServiceProvider;
 use Platform\Subscriptions\Providers\SubscriptionsServiceProvider;
 use Platform\Tenancy\Providers\TenancyServiceProvider;
 use Webkul\Admin\Providers\AdminServiceProvider;
@@ -63,6 +64,18 @@ return [
      * channel, or config value. See docs/architecture/tenancy.md (R9).
      */
     TenancyServiceProvider::class,
+
+    /**
+     * TASK-MVP-001: public merchant self-service signup - depends ONLY on
+     * Platform\Tenancy (Tenant model, TenantProvisioner), registered
+     * immediately after it. `TenantProvisioner::provision()` internally
+     * resolves Plans/Subscriptions classes at request time regardless of
+     * this provider's own registration order (those packages' providers
+     * finish booting well before any HTTP request is dispatched), so
+     * placement here reflects Signup's actual dependency graph, not a
+     * functional requirement. See docs/architecture/signup.md.
+     */
+    SignupServiceProvider::class,
 
     /**
      * Plan/feature entitlement domain (TASK-ARCH-008) - depends on

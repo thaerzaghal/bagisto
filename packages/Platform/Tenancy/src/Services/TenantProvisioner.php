@@ -6,6 +6,7 @@ namespace Platform\Tenancy\Services;
 
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Platform\Plans\Models\Plan;
@@ -32,8 +33,28 @@ class TenantProvisioner
      * times: a READY tenant is a no-op, a PENDING/PROVISIONING/FAILED tenant
      * (re)runs the remaining steps, each of which checks its own completion
      * state before acting.
+     *
+     * TASK-MVP-001: `$ownerAdmin` is an OPTIONAL, additive parameter -
+     * `['name' => ..., 'email' => ..., 'password' => <plaintext>]`. When
+     * given, the final step (ensureOwnerAdminSeeded()) overwrites the
+     * seeded placeholder admin (admin@example.com/admin123, identical
+     * across every tenant today - see AdminsTableSeeder) with the real
+     * merchant identity. Every existing caller (the `tenant:provision`
+     * CLI command, Platform Admin's provision/retry action) passes
+     * nothing and is completely unaffected - this is the deliberate
+     * reason the parameter is optional rather than a second, parallel
+     * provisioning method: owner-admin identity is a genuine step in the
+     * SAME canonical, retry-safe pipeline every other provisioning
+     * concern already goes through, not a bolt-on side effect that could
+     * be silently skipped on a resumed/retried attempt. The plaintext
+     * password is never written to `$tenant`/`data`/any log by this
+     * method or by ensureOwnerAdminSeeded() - it lives only in this
+     * call's own stack for the duration of the request; see
+     * Platform\Signup\Services\MerchantOnboarding for why a failed
+     * attempt requires the merchant to re-supply it on retry rather than
+     * this class (or anything else) persisting it anywhere.
      */
-    public function provision(Tenant $tenant): void
+    public function provision(Tenant $tenant, ?array $ownerAdmin = null): void
     {
         if ($tenant->status === TenantStatus::Ready) {
             return;
@@ -53,6 +74,7 @@ class TenantProvisioner
             $this->ensureMigrated($tenant);
             $this->ensureSeeded($tenant);
             $this->ensureInitialSubscriptionStarted($tenant);
+            $this->ensureOwnerAdminSeeded($tenant, $ownerAdmin);
 
             $tenant->forceFill(['status' => TenantStatus::Ready])->save();
         } catch (Throwable $e) {
@@ -269,5 +291,57 @@ class TenantProvisioner
         }
 
         app(SubscriptionLifecycle::class)->start($tenant, $plan);
+    }
+
+    /**
+     * Step 6 (TASK-MVP-001, optional - see provision()'s own docblock):
+     * replaces the seeded placeholder admin (id=1, always
+     * admin@example.com/admin123 today - AdminsTableSeeder has no
+     * per-tenant identity concept of its own) with the real merchant
+     * identity collected at self-service signup.
+     *
+     * No-ops (does nothing at all) when $ownerAdmin is null - the
+     * unchanged behavior for every existing caller (CLI, Platform Admin).
+     * Deliberately a plain `DB::table('admins')->update()`, not an
+     * `Webkul\User\Models\Admin` Eloquent write - `Platform\Enforcement`
+     * is the one Platform package with a standing exception to depend on
+     * a specific `Webkul\*` package (DECISION_LOG C23); this does not
+     * need that exception at all, since a raw table update needs no
+     * model import, keeping `Platform\Tenancy` exactly as
+     * Webkul-independent as it already is.
+     *
+     * Idempotent by construction: an UPDATE against a known row (id=1,
+     * guaranteed to exist by the time this step runs, since
+     * ensureSeeded() already succeeded without throwing) is safe to
+     * repeat any number of times, including with a corrected password on
+     * a retried attempt - unlike ensureDatabaseCreated()/ensureSeeded(),
+     * there is no "must not redo" hazard here at all.
+     *
+     * Password is hashed here, at the single point of use, via
+     * Illuminate\Support\Facades\Hash (Webkul\User\Models\Admin has no
+     * 'hashed' cast - AdminsTableSeeder itself hashes manually before its
+     * own raw insert, the same pattern this mirrors). The plaintext value
+     * passed in is never written anywhere else by this method.
+     */
+    protected function ensureOwnerAdminSeeded(Tenant $tenant, ?array $ownerAdmin): void
+    {
+        if ($ownerAdmin === null) {
+            return;
+        }
+
+        $tenant->run(function () use ($ownerAdmin) {
+            if (! Schema::hasTable('admins') || ! DB::table('admins')->where('id', 1)->exists()) {
+                throw new RuntimeException(
+                    'Cannot set owner admin identity: no seeded admin row exists yet (seeding step did not complete as expected).'
+                );
+            }
+
+            DB::table('admins')->where('id', 1)->update([
+                'name' => $ownerAdmin['name'],
+                'email' => $ownerAdmin['email'],
+                'password' => Hash::make($ownerAdmin['password']),
+                'updated_at' => now(),
+            ]);
+        });
     }
 }
