@@ -10,13 +10,33 @@
  * platform:migrate:central, wiping an explicitly disposable database)
  * fully intact.
  *
- * This suite's own test process boots with the real bagisto_central as its
- * default database (phpunit.xml does not override DB_CONNECTION/DB_DATABASE
- * - see CentralDatabaseWipeGuard's docblock for why that is deliberate: the
- * real risk is keyed on database NAME, not APP_ENV), so
- * CentralDatabaseWipeGuard::apply() has already prohibited db:wipe/
- * migrate:fresh/migrate:refresh/migrate:reset for this entire process by
- * the time these tests run - exactly the scenario under test.
+ * TASK-ARCH-017A (fixing a real defect the first GitHub Actions run
+ * exposed). Tests 4-6 originally ran db:wipe/migrate:fresh/bagisto:install
+ * against THIS PROCESS'S OWN ambient default connection, on the assumption
+ * that it is always literally `bagisto_central` - true in local development
+ * (phpunit.xml does not override DB_CONNECTION/DB_DATABASE), but FALSE in
+ * CI, where the Platform lane's database is correctly, deliberately
+ * `bagisto_ci_platform` (a disposable name CentralDatabaseWipeGuard does
+ * NOT protect - by design, since CI's own database must remain wipeable).
+ * Under the old design, in CI the guard correctly allowed db:wipe to
+ * proceed, which genuinely dropped that CI job's own central tables mid-run
+ * and cascaded into every later test in the suite (`Table
+ * 'bagisto_ci_platform.plans' doesn't exist`).
+ *
+ * Fix: tests 4-6 now create their OWN throwaway database literally named
+ * `bagisto_central`, independent of whatever the ambient default connection
+ * happens to be, and drive the artisan command via a real subprocess
+ * (`Illuminate\Support\Facades\Process`) with DB_DATABASE pointed at it -
+ * this proves the actual runtime mechanism (not just the pure
+ * classification function, which tests 1-3 already cover with zero DB
+ * interaction) without ever depending on, or risking, the CI job's own
+ * active database. Guarded by an existence check: if a database already
+ * named `bagisto_central` is found on the connected MySQL server (i.e. this
+ * suite is running against a real local development environment, where a
+ * genuine, non-disposable bagisto_central lives), the test SKIPS rather
+ * than ever creating/touching/dropping anything under that name - never
+ * relying on "the guard will surely reject it" as a reason it's safe to
+ * experiment with a real central database's name.
  */
 
 use Illuminate\Support\Facades\DB;
@@ -28,20 +48,83 @@ use Platform\Tenancy\Services\TenantProvisioner;
 
 uses(Tests\Feature\Platform\PlatformIntegrationTestCase::class);
 
-function centralTableSnapshot(): array
+/**
+ * The app's own 'mysql' connection uses the least-privileged 'sail' user
+ * (no CREATE/DROP DATABASE grant, by design - see INCIDENT-001's tenant
+ * mapping findings), so creating/dropping/inspecting a throwaway database
+ * uses a direct root PDO connection instead, exactly like the INCIDENT-001
+ * forensic investigation itself did outside the app.
+ */
+function withRootMysqlConnection(callable $callback): mixed
 {
-    $rows = DB::connection('mysql')->select('SHOW TABLES');
+    $pdo = new PDO(
+        'mysql:host='.config('database.connections.mysql.host').';port='.config('database.connections.mysql.port'),
+        'root',
+        'password'
+    );
 
-    $tables = array_map(fn ($row) => array_values((array) $row)[0], $rows);
+    return $callback($pdo);
+}
 
-    sort($tables);
+function aDatabaseNamedBagistoCentralAlreadyExists(): bool
+{
+    return withRootMysqlConnection(function (PDO $pdo) {
+        $statement = $pdo->query(
+            "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = 'bagisto_central'"
+        );
 
-    return [
-        'tables' => $tables,
-        'plans_count' => DB::connection('mysql')->table('plans')->count(),
-        'tenants_count' => DB::connection('mysql')->table('tenants')->count(),
-        'subscriptions_count' => DB::connection('mysql')->table('subscriptions')->count(),
-    ];
+        return (bool) $statement->fetch();
+    });
+}
+
+/**
+ * Proves a guarded command (db:wipe/migrate:fresh/bagisto:install) is
+ * rejected before any DROP against a throwaway database literally named
+ * `bagisto_central` - created and destroyed entirely within this function,
+ * never touching the calling process's own ambient database. Skips (never
+ * creates/touches anything) if a database already named `bagisto_central`
+ * exists on the connected MySQL server.
+ */
+function assertGuardedCommandRejectsRealBagistoCentral(string $command, array $arguments = []): void
+{
+    if (aDatabaseNamedBagistoCentralAlreadyExists()) {
+        test()->markTestSkipped(
+            'A database already named bagisto_central exists on this MySQL server (real local '.
+            'development data) - skipping the isolated destructive-subprocess proof to avoid ever '.
+            'creating/touching/dropping anything under that name, even briefly. Test 1\'s pure '.
+            'classification check already proves the same safety property without touching any '.
+            'database at all.'
+        );
+
+        return;
+    }
+
+    withRootMysqlConnection(function (PDO $pdo) {
+        $pdo->exec('CREATE DATABASE `bagisto_central`');
+        $pdo->exec('CREATE TABLE `bagisto_central`.marker_table (id INT PRIMARY KEY)');
+    });
+
+    try {
+        $commandLine = 'php artisan '.$command.' '.implode(' ', $arguments);
+
+        $result = Process::env(['DB_DATABASE' => 'bagisto_central'])->run($commandLine);
+
+        $markerTableStillExists = withRootMysqlConnection(function (PDO $pdo) {
+            $statement = $pdo->query(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ".
+                "WHERE TABLE_SCHEMA = 'bagisto_central' AND TABLE_NAME = 'marker_table'"
+            );
+
+            return (bool) $statement->fetch();
+        });
+
+        expect($markerTableStillExists)->toBeTrue(
+            "Expected [{$command}] to leave the throwaway bagisto_central-named database's tables ".
+            "untouched. Process output:\n".$result->output().$result->errorOutput()
+        );
+    } finally {
+        withRootMysqlConnection(fn (PDO $pdo) => $pdo->exec('DROP DATABASE IF EXISTS `bagisto_central`'));
+    }
 }
 
 test('1. CentralDatabaseWipeGuard classifies the central database as never safe', function () {
@@ -63,64 +146,17 @@ test('3. CentralDatabaseWipeGuard classifies approved disposable prefixes as saf
     expect(CentralDatabaseWipeGuard::databaseIsSafeForDestructiveCommands('some_random_db'))->toBeFalse();
 });
 
-test('4. db:wipe against bagisto_central is rejected before any DROP', function () {
-    $before = centralTableSnapshot();
-
-    $this->artisan('db:wipe', ['--force' => true])->run();
-
-    $after = centralTableSnapshot();
-
-    expect($after)->toBe($before);
+test('4. db:wipe against a real bagisto_central is rejected before any DROP (isolated, environment-independent)', function () {
+    assertGuardedCommandRejectsRealBagistoCentral('db:wipe', ['--force', '--database=mysql']);
 });
 
-test('5. migrate:fresh against bagisto_central is rejected before any DROP', function () {
-    $before = centralTableSnapshot();
-
-    $this->artisan('migrate:fresh', ['--force' => true])->run();
-
-    $after = centralTableSnapshot();
-
-    expect($after)->toBe($before);
+test('5. migrate:fresh against a real bagisto_central is rejected before any DROP (isolated, environment-independent)', function () {
+    assertGuardedCommandRejectsRealBagistoCentral('migrate:fresh', ['--force', '--database=mysql']);
 });
 
-test('6. bagisto:install against bagisto_central is rejected before any DROP', function () {
-    $before = centralTableSnapshot();
-
-    try {
-        $this->artisan('bagisto:install', ['--no-interaction' => true])->run();
-    } catch (\Throwable $e) {
-        // Expected: db:wipe/migrate:fresh silently no-op (Prohibitable),
-        // so bagisto:install's own subsequent seeding step fails loudly
-        // against tables that were never (re)created centrally - see
-        // CentralDatabaseWipeGuard's docblock for why a clean top-level
-        // rejection of bagisto:install itself is not guaranteed under
-        // Pest/testing (RejectBagistoInstallAgainstProtectedDatabase is
-        // real-CLI-only). The safety property under test is that nothing
-        // was dropped, not the exact shape of the resulting error.
-    }
-
-    $after = centralTableSnapshot();
-
-    expect($after)->toBe($before);
+test('6. bagisto:install against a real bagisto_central is rejected before any DROP (isolated, environment-independent)', function () {
+    assertGuardedCommandRejectsRealBagistoCentral('bagisto:install', ['--no-interaction']);
 });
-
-/**
- * The app's own 'mysql' connection uses the least-privileged 'sail' user
- * (no CREATE/DROP DATABASE grant, by design - see INCIDENT-001's tenant
- * mapping findings), so creating/dropping a throwaway database for this one
- * test uses a direct root PDO connection instead, exactly like the
- * INCIDENT-001 forensic investigation itself did outside the app.
- */
-function withRootMysqlConnection(callable $callback): mixed
-{
-    $pdo = new PDO(
-        'mysql:host='.config('database.connections.mysql.host').';port='.config('database.connections.mysql.port'),
-        'root',
-        'password'
-    );
-
-    return $callback($pdo);
-}
 
 test('7. destructive commands are NOT prohibited against an explicitly disposable database (fresh process)', function () {
     $disposableDatabase = 'bagisto_test_incident001_wipeguard_'.substr(md5((string) microtime(true)), 0, 8);
@@ -177,4 +213,28 @@ test('8. tenant provisioning and tenant migrations still work under the guard', 
 
 test('9. platform:migrate:central still works under the guard', function () {
     $this->artisan('platform:migrate:central')->assertSuccessful();
+});
+
+test('10. the active default connection database is never touched by the destructive-rejection tests', function () {
+    // TASK-ARCH-017A regression proof: tests 4-6 must never depend on, or
+    // mutate, whatever the CURRENT process's own default database happens
+    // to be (bagisto_central locally, bagisto_ci_platform in CI) - this is
+    // the exact property whose absence caused the original CI failure.
+    $activeDatabase = CentralDatabaseWipeGuard::currentDefaultDatabaseName();
+
+    expect(DB::connection('mysql')->getDatabaseName())->toBe($activeDatabase);
+
+    $stillHasCoreTables = withRootMysqlConnection(function (PDO $pdo) use ($activeDatabase) {
+        $statement = $pdo->query(
+            "SELECT COUNT(*) as c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{$activeDatabase}'"
+        );
+
+        return (int) $statement->fetch()['c'] > 0;
+    });
+
+    expect($stillHasCoreTables)->toBeTrue(
+        "The active database [{$activeDatabase}] unexpectedly has zero tables - it should never be ".
+        'touched by this file\'s destructive-rejection tests (4-6), which operate on an isolated '.
+        'throwaway bagisto_central-named database instead.'
+    );
 });

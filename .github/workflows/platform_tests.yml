@@ -1,6 +1,19 @@
 name: Platform Tests
 
-on: [push, pull_request]
+# TASK-ARCH-017A. Manual/on-demand only, deliberately - NOT [push,
+# pull_request]. This project is on a GitHub Free plan; the full Platform
+# integration suite and the production-config smoke suite are both
+# real-MySQL(+Redis), multi-minute jobs, and running them automatically on
+# every ordinary push/PR would consume Actions minutes for no benefit over
+# the local commands documented in docs/implementation/ci-testing.md (which
+# remain the PRIMARY verification loop - see that file's "Local developer
+# commands"). This workflow exists for deliberate milestone verification
+# (before a release, after a significant Platform change) via the Actions
+# tab's "Run workflow" button, not as a per-commit gate. Kept simple (no
+# inputs, no job selection) rather than adding a chooser between full/smoke/
+# both - both jobs always run together on dispatch; there was no clear
+# benefit found to selective triggering for a manually-invoked workflow.
+on: workflow_dispatch
 
 permissions:
   contents: read
@@ -55,6 +68,20 @@ jobs:
       # Disposable, ephemeral GitHub Actions service container database -
       # see this file's own top-level comment for why the name must stay
       # bagisto_ci_-prefixed rather than bagisto_central.
+      #
+      # TASK-ARCH-017A fix: DB_PROVISION_USERNAME/DB_PROVISION_PASSWORD were
+      # missing here entirely, which is what actually broke the smoke lane
+      # (this job's own tenant provisioning uses them too, just wasn't
+      # exercised by a failure until Lane C's smoke tests hit it first -
+      # config/database.php's "tenant_provisioning" connection needs elevated
+      # CREATE DATABASE/CREATE USER privileges; .env.example intentionally
+      # leaves these blank, and Laravel's env() does not fall back to
+      # DB_USERNAME/DB_PASSWORD for a key that is explicitly present but
+      # empty, only for one that is truly unset). Reusing this job's own
+      # MySQL service root credentials (declared two lines above, already
+      # not a secret - the whole service container is thrown away when the
+      # job ends) is exactly the "CI-local MySQL service configuration, no
+      # real/local secrets" TASK-ARCH-017A asked for.
       - name: Setting Environment
         run: |
           cp .env.example .env
@@ -64,6 +91,8 @@ jobs:
           sed -i "s|^\(DB_DATABASE=\s*\).*$|\1bagisto_ci_platform|" .env
           sed -i "s|^\(DB_USERNAME=\s*\).*$|\1root|" .env
           sed -i "s|^\(DB_PASSWORD=\s*\).*$|\1root|" .env
+          sed -i "s|^\(DB_PROVISION_USERNAME=\s*\).*$|\1root|" .env
+          sed -i "s|^\(DB_PROVISION_PASSWORD=\s*\).*$|\1root|" .env
           cat .env
 
       - name: Generating Application Key
@@ -139,6 +168,11 @@ jobs:
       # steps below (which don't go through PHPUnit) still run against a
       # disposable, ordinary-config database, and only the smoke TEST
       # PROCESS itself exercises the production-intended values.
+      # TASK-ARCH-017A fix: see Lane B's own "Setting Environment" step
+      # comment - the same DB_PROVISION_USERNAME/DB_PROVISION_PASSWORD gap
+      # is what actually broke this lane (every one of its 9 tests failed
+      # identically on tenant provisioning's "Access denied for user
+      # ''@..." before even reaching a real assertion).
       - name: Setting Environment
         run: |
           cp .env.example .env
@@ -148,6 +182,8 @@ jobs:
           sed -i "s|^\(DB_DATABASE=\s*\).*$|\1bagisto_ci_smoke|" .env
           sed -i "s|^\(DB_USERNAME=\s*\).*$|\1root|" .env
           sed -i "s|^\(DB_PASSWORD=\s*\).*$|\1root|" .env
+          sed -i "s|^\(DB_PROVISION_USERNAME=\s*\).*$|\1root|" .env
+          sed -i "s|^\(DB_PROVISION_PASSWORD=\s*\).*$|\1root|" .env
           sed -i "s|^\(REDIS_HOST=\s*\).*$|\1127.0.0.1|" .env
           sed -i "s|^\(REDIS_PORT=\s*\).*$|\1${{ job.services.redis.ports['6379'] }}|" .env
           sed -i "s|^\(REDIS_CLIENT=\s*\).*$|\1predis|" .env

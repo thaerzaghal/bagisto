@@ -1,18 +1,23 @@
-# Platform CI & Testing (TASK-ARCH-017)
+# Platform CI & Testing (TASK-ARCH-017, revised TASK-ARCH-017A)
 
 Real implementation record - not a Phase 0 speculative sketch. See
 [testing-strategy.md](testing-strategy.md) for the original Phase 0 plan;
 this document describes what actually exists.
 
-## Local developer commands
+## Local testing is primary
+
+**Local Pest runs are the normal development workflow - not GitHub Actions.**
+Run these after every meaningful change, exactly like every other Pest suite
+in this repository:
 
 ```bash
-# Full Platform integration suite (tests/Feature/Platform), default config
+# A. Full Platform integration suite (tests/Feature/Platform), default config
 # (CACHE_STORE=array, QUEUE_CONNECTION=sync, SESSION_DRIVER=array - matching
 # every other Pest suite in this repository):
-vendor/bin/pest --testsuite="Platform Feature Test"
+vendor/bin/pest tests/Feature/Platform
+# (equivalently: vendor/bin/pest --testsuite="Platform Feature Test")
 
-# Production-configuration smoke lane - MUST use -c, never run the directory
+# B. Production-configuration smoke lane - MUST use -c, never run the directory
 # alone (see phpunit.smoke.xml's own docblock for why):
 vendor/bin/pest -c phpunit.smoke.xml
 
@@ -22,19 +27,37 @@ vendor/bin/pest --list-tests --testsuite="Platform Feature Test" | head
 
 `tests/Feature/Platform` is registered as a real named PHPUnit/Pest suite
 (`phpunit.xml`, "Platform Feature Test") - a bare `vendor/bin/pest` with no
-`--testsuite` filter now includes it by default, closing the gap where
-Platform tests were previously only ever run manually.
+`--testsuite` filter now includes it by default.
+
+**C. GitHub Actions is an additional, manual milestone-verification layer**
+(`.github/workflows/platform_tests.yml`, `workflow_dispatch` only - see
+"Why the Platform lanes are manual, not automatic" below) - not required
+after every local commit, and not a substitute for running A/B locally
+first.
 
 ## CI lanes
 
 Three lanes across two workflow files, all additive - no pre-existing
 Bagisto/Webkul CI coverage was removed:
 
-| Lane | Workflow | Job | What it proves |
-|---|---|---|---|
-| A. Existing Bagisto tests | `.github/workflows/pest_tests.yml` | `pest_tests` | Unmodified upstream Webkul package suites (Admin/Core/Customer/DataGrid/EUWithdrawal/Installer/PayGlocal/PayU/Razorpay/Shop/Stripe) - unchanged behavior, only its CI database was renamed (see "Safe database naming" below) |
-| B. Platform full integration suite | `.github/workflows/platform_tests.yml` | `platform_tests` | The full `tests/Feature/Platform` suite, default test config |
-| C. Production-config smoke | `.github/workflows/platform_tests.yml` | `platform_smoke_tests` | A small, focused suite proving the golden path survives under this project's real, production-intended config |
+| Lane | Workflow | Job | Trigger | What it proves |
+|---|---|---|---|---|
+| A. Existing Bagisto tests | `.github/workflows/pest_tests.yml` | `pest_tests` | automatic, every push/PR (unchanged from upstream) | Unmodified upstream Webkul package suites (Admin/Core/Customer/DataGrid/EUWithdrawal/Installer/PayGlocal/PayU/Razorpay/Shop/Stripe) - unchanged behavior, only its CI database was renamed (see "Safe database naming" below) |
+| B. Platform full integration suite | `.github/workflows/platform_tests.yml` | `platform_tests` | manual (`workflow_dispatch`) | The full `tests/Feature/Platform` suite, default test config |
+| C. Production-config smoke | `.github/workflows/platform_tests.yml` | `platform_smoke_tests` | manual (`workflow_dispatch`) | A small, focused suite proving the golden path survives under this project's real, production-intended config |
+
+## Why the Platform lanes are manual, not automatic (TASK-ARCH-017A)
+
+This project is on a **GitHub Free plan**. Lanes B and C are both real-MySQL
+(Lane C also real-Redis), multi-minute jobs - running them automatically on
+every ordinary push/pull request would consume Actions minutes for no
+benefit over running the same suites locally (which is faster feedback
+anyway, and is already required before pushing). `platform_tests.yml` uses
+`on: workflow_dispatch` - triggered manually from the Actions tab, intended
+for deliberate milestone verification (before a release, after a
+significant Platform change), not as a per-commit gate. Lane A is
+unaffected and keeps its original automatic `[push, pull_request]` trigger,
+unchanged from upstream Bagisto.
 
 ## MySQL/Redis dependencies
 
@@ -166,20 +189,89 @@ parallel Platform CI is wanted later, it needs its own dedicated
 feasibility investigation (per-worker database prefixing, fixture
 isolation proof) - not assumed safe by default.
 
+## TASK-ARCH-017A fixes (first real GitHub Actions run)
+
+The first real GitHub Actions run of Lanes B/C (2026-08-15) exposed two
+genuine defects, both fixed without touching `CentralDatabaseWipeGuard`,
+`RejectBagistoInstallAgainstProtectedDatabase`, or any other runtime
+application code:
+
+1. **Lane B** - `tests/Feature/Platform/CentralDatabaseWipeGuardTest.php`'s
+   destructive-rejection tests (4-6) originally assumed the active process
+   database is always literally `bagisto_central`. True locally, false in
+   CI (Lane B's database is correctly the disposable `bagisto_ci_platform`,
+   which the guard correctly does NOT protect) - so `db:wipe` genuinely
+   executed for real against that CI job's own central tables, cascading
+   into most of the rest of the suite. Fixed by making those tests
+   environment-independent: they now create their own throwaway database
+   literally named `bagisto_central`, drive the guarded command via a real
+   subprocess pointed at it, and clean up - never touching whatever the
+   ambient default connection happens to be. Guarded by an existence check
+   that SKIPS (never creates/touches/drops anything) if a database already
+   named `bagisto_central` is found on the connected MySQL server, i.e. a
+   real local development environment - test 1's pure classification check
+   already covers that safety property there without touching any database.
+   A new test 10 explicitly proves the active default-connection database's
+   tables are untouched by tests 4-6.
+2. **Lane C** (and, less visibly, Lane B - both jobs provision tenants) -
+   `platform_tests.yml`'s "Setting Environment" step never set
+   `DB_PROVISION_USERNAME`/`DB_PROVISION_PASSWORD`. `config/database.php`'s
+   `tenant_provisioning` connection (the elevated connection
+   `Platform\Tenancy\Services\TenantProvisioner` uses to create/manage
+   tenant databases - see RISK_REGISTER.md R18) fell back to
+   `.env.example`'s explicitly-blank defaults, and Laravel's `env()` does
+   not fall back to `DB_USERNAME`/`DB_PASSWORD` for a key that is present
+   but empty - only for one that is truly unset. Every one of Lane C's 9
+   smoke tests failed identically on `Access denied for user ''@...`
+   before reaching a real assertion. Fixed by setting both to `root`,
+   reusing each job's own already-declared, non-secret MySQL service
+   root credentials (the whole service container is disposable and
+   destroyed when the job ends) - no real/local secret involved.
+
 ## R34 status
 
-**IMPLEMENTED / PENDING FIRST CI VERIFICATION** - a genuine, automated
+**IMPLEMENTED / MANUAL CI VERIFICATION AVAILABLE** - a genuine
 production-config smoke lane exists (Lane C above), runs the real
-production-intended values, and is wired into CI
-(`.github/workflows/platform_tests.yml`), not merely documented. Local YAML
-parsing and local Pest execution prove implementation correctness, but not
-that the actual GitHub Actions environment works - this closes only once a
-real GitHub Actions run on `2.4` completes the `platform_smoke_tests` job
-successfully. See RISK_REGISTER.md.
+production-intended values, passes locally (9/9), and can be run in GitHub
+Actions on demand via `workflow_dispatch`. Not claimed as continuous
+per-push CI coverage - Lanes B/C were deliberately made manual-only to
+conserve GitHub Free-tier Actions minutes (see "Why the Platform lanes are
+manual, not automatic" above). See RISK_REGISTER.md.
 
 ## CI gap status
 
-**IMPLEMENTED / PENDING FIRST CI VERIFICATION** - `tests/Feature/Platform`
-is wired to run automatically on every push and pull request (Lane B), not
-manually only, but this has not yet been proven against a real GitHub
-Actions run. See RISK_REGISTER.md.
+**IMPLEMENTED / MANUAL CI VERIFICATION AVAILABLE** - `tests/Feature/Platform`
+is wired into a real CI workflow and can be run on demand, closing the
+original "manual-only, no CI wiring at all" gap, but does not run
+automatically on every push/PR by deliberate resource-conservation
+decision, not oversight. Local execution (`vendor/bin/pest tests/Feature/Platform`)
+remains the primary, required verification step for every change. See
+RISK_REGISTER.md.
+
+## Upstream Bagisto CI incompatibility (documented, not fixed here)
+
+The first real GitHub Actions run also exposed that Lane A
+(`pest_tests.yml`) and both Playwright workflows currently fail in this
+fork, for a reason unrelated to Lanes B/C or today's fix: `bagisto:install`'s
+internal `migrate` step is rejected by
+`Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema` (R30) on
+the first Webkul package migration it encounters, since that guard
+correctly refuses to let any non-central migration run against the central
+connection. This is a genuine, pre-existing incompatibility between R30's
+protection and upstream Bagisto's own installer-based CI bootstrap,
+first empirically confirmed against real GitHub Actions on this push (it
+was suspected and documented locally before INCIDENT-001, but never
+verified against real CI until now, since this was the first push of any
+Platform-era commit to `origin/2.4`).
+
+**Deliberately not fixed as part of TASK-ARCH-017/017A** - `bagisto:install`
+is already explicitly unsupported as a Platform/SaaS bootstrap workflow (see
+[provisioning.md](../architecture/provisioning.md) and
+[INCIDENT-001-central-db-wipe.md](../incidents/INCIDENT-001-central-db-wipe.md)),
+and neither `PreventCentralMigrationOfTenantSchema`, `CentralDatabaseWipeGuard`,
+nor `RejectBagistoInstallAgainstProtectedDatabase` should be weakened merely
+to make upstream CI green again. Whether/how to repair Lane A and the
+Playwright workflows (e.g. bootstrapping them via the supported Platform
+sequence instead of `bagisto:install`, or accepting they test a
+configuration this fork no longer fully supports) is left for a future,
+deliberate decision - out of scope here.
