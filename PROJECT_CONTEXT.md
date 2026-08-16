@@ -68,11 +68,15 @@ Platform\Admin -> Tenancy, Plans, Subscriptions, Billing (reads their central mo
 - Billing: Stripe sandbox checkout + webhook, signature-verified, idempotent, wired to `SubscriptionLifecycle::changePlan()`.
 - CI: `pest_tests.yml` (upstream Bagisto lane, automatic) + `platform_tests.yml` (Platform suite + production-config smoke lane, manual `workflow_dispatch` to conserve GitHub Free-tier minutes).
 
-**NOT built (the real MVP gaps)**:
-- **No merchant self-service signup.** The only way a tenant comes into existence is `php artisan tenant:provision {id} --domain=...` on the CLI, or Platform Admin re-provisioning an *already-existing* tenant row. There is no public route, no signup form, no way for a prospective merchant to create their own store.
-- **No verified shopper order flow under tenancy.** Every isolation proof in this codebase stops at "a repository call / the homepage renders correctly per-tenant." No test has ever driven a full browse → cart → checkout → order-placed flow against a tenant storefront. Bagisto's own checkout logic is untouched and presumably works, but this has never been exercised end-to-end the way e.g. the sessions-table gap (R33) was only found by actually rendering a real page.
-- Merchant onboarding wizard, store branding, custom-domain workflow — none exist (subdomain-only, single domain per tenant via CLI).
-- Production deployment posture: still Docker-local, `trustProxies(at: '*')` unaddressed (R20), no real domain/SSL strategy decided, Redis not provisioned anywhere real.
+**Built since the section above was last accurate (TASK-MVP-001/002/003/004A)**:
+- **Merchant self-service signup — DONE (TASK-MVP-001).** `packages/Platform/Signup`: public `/join` form creates a Tenant + Domain, triggers `TenantProvisioner`, gives the merchant a real self-chosen owner email/password (never a hardcoded seeded default), with signed-URL retry authorization for provisioning failures. R19 resolved at this exact input boundary (slug allowlist regex).
+- **Shopper order flow — VERIFIED end-to-end (TASK-MVP-002).** Real browse → cart → checkout → order-placed flow proven against a real tenant storefront (Cash on Delivery), fully tenant-isolated, inventory reservation confirmed, newly-provisioned-merchant usability confirmed (no provisioning gap).
+- **First-run merchant readiness — VERIFIED (TASK-MVP-003).** Bagisto Admin confirmed already sufficient for all core merchant capability; one real provisioning gap found and fixed (channel hostname defaulting to the central URL instead of the tenant's own domain); small welcome banner added on first post-signup login.
+- **Production application hardening — DONE (TASK-MVP-004A).** `TRUSTED_PROXIES` (closes R20 at the application level), `PLATFORM_CENTRAL_DOMAINS` (explicit, separate from `PLATFORM_BASE_DOMAIN`), a clean Stripe-unavailable checkout UX fix, `platform:production:check`, and `docs/architecture/production-deployment.md`. Actual infrastructure (real domain/server/DNS/TLS/SMTP/Redis, backup scheduling) remains TASK-MVP-004B, not yet started.
+
+**Still NOT built**:
+- Merchant onboarding wizard beyond the one-time welcome banner, store branding beyond stock Bagisto Admin settings, custom-domain-per-tenant workflow — none exist (subdomain-only, single domain per tenant).
+- **Actual production infrastructure (TASK-MVP-004B)**: no real domain/server has been chosen or provisioned, no real DNS/TLS/SMTP/Redis exists anywhere outside Docker-local, no backup script/schedule exists yet (policy documented, not implemented).
 
 # Important Invariants
 
@@ -101,19 +105,24 @@ Platform\Admin -> Tenancy, Plans, Subscriptions, Billing (reads their central mo
 
 # Current Git Baseline
 
-Branch `2.4`, latest approved commit: `f7c0ab74f2e5b6a4c80efb6b17049a77ccb0ac25` ("feat(platform): add Stripe sandbox checkout and webhook payment confirmation"). 3 commits ahead of `origin/2.4`, not pushed. This is a point-in-time baseline — check `git log`/`git status` fresh rather than trusting this file if it's been a while.
+Branch `2.4`, latest approved commit as of TASK-MVP-004A: `cbda674cd6a8dc7c26ba89040c706004400233eb` ("feat(platform): improve merchant first-run store readiness", TASK-MVP-003). 7 commits ahead of `origin/2.4`, not pushed (TASK-MVP-001/002/003 plus earlier work). TASK-MVP-004A's own changes are implemented and tested but NOT YET COMMITTED as of this review - pending explicit approval. This is a point-in-time baseline — check `git log`/`git status` fresh rather than trusting this file if it's been a while.
 
 # Completed Foundation
 
-Nineteen-plus architecture tasks (TASK-ARCH-001 through TASK-ARCH-019, plus INCIDENT-001 recovery) built, in order: tenancy feasibility → tenant model/provisioning → domain routing → cache/filesystem/queue/search isolation → plan/entitlement domain → tenant admin plan display → platform admin foundation → product-limit enforcement (+ bulk-import bypass closure) → tenant suspension → full tenant readiness access gate → plan/feature CRUD in Platform Admin → provider-agnostic subscription domain → CI + production-config smoke testing (interrupted by INCIDENT-001, recovered, resumed) → CI stabilization → provider-agnostic billing domain + Stripe reference adapter → live Stripe sandbox checkout + webhook flow. Every task closed with a full evidence-based report (real HTTP requests, real MySQL, real Redis, real queued jobs — no mocking of this project's own infrastructure) before commit, and every commit was individually approved.
+Nineteen-plus architecture tasks (TASK-ARCH-001 through TASK-ARCH-019, plus INCIDENT-001 recovery) built, in order: tenancy feasibility → tenant model/provisioning → domain routing → cache/filesystem/queue/search isolation → plan/entitlement domain → tenant admin plan display → platform admin foundation → product-limit enforcement (+ bulk-import bypass closure) → tenant suspension → full tenant readiness access gate → plan/feature CRUD in Platform Admin → provider-agnostic subscription domain → CI + production-config smoke testing (interrupted by INCIDENT-001, recovered, resumed) → CI stabilization → provider-agnostic billing domain + Stripe reference adapter → live Stripe sandbox checkout + webhook flow.
+
+Followed by the MVP track: TASK-MVP-001 (self-service signup/provisioning) → TASK-MVP-002 (shopper order end-to-end verification) → TASK-MVP-003 (merchant first-run store readiness) → TASK-MVP-004 (read-only production-launch-readiness investigation) → TASK-MVP-004A (application production hardening - `TRUSTED_PROXIES`/R20, central-domain config, Stripe-unavailable UX, `platform:production:check`, production-deployment runbook).
+
+Every task closed with a full evidence-based report (real HTTP requests, real MySQL, real Redis, real queued jobs — no mocking of this project's own infrastructure) before commit, and every commit was individually approved.
 
 # Open Risks
 
 (Full detail in `RISK_REGISTER.md`; only the still-genuinely-open items, reclassified by this review:)
 
-- **R19** (Low, previously deferred as "tenant IDs are platform-generated, not user input") — **becomes MUST-FIX if/when self-service signup lands**: `MySQLDatabaseManager` interpolates the tenant database name into raw DDL with no identifier escaping. Safe today only because every tenant `id` is chosen by an operator/CLI. The moment a merchant-chosen subdomain/slug feeds tenant `id` creation (TASK-MVP-001), this needs input validation/character allowlisting.
-- **R20** (High, documented not mitigated) — `trustProxies(at: '*')` trusts `X-Forwarded-Host` from anyone, and tenant resolution depends entirely on `$request->getHost()`. Must be restricted to the real proxy/LB IP range before any real external deployment.
-- **DECISION_LOG "HUMAN DECISION REQUIRED" #3** — custom-domain/SSL strategy, unresolved. For MVP this can be narrowed to "wildcard cert for our own subdomains," deferring true custom-domain-per-tenant SSL.
+- **R19** — **RESOLVED (TASK-MVP-001)**: self-service signup landed with a slug allowlist regex (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) validated before any tenant `id`/database name is derived - closed for every current tenant-creation path.
+- **R20** — **CLOSED AT THE APPLICATION LEVEL (TASK-MVP-004A)**: `TRUSTED_PROXIES` (env-driven, falls back to `'*'` only when unset) replaces the hardcoded `trustProxies(at: '*')`. The real production proxy IP value is still an infrastructure decision (TASK-MVP-004B).
+- **DECISION_LOG "HUMAN DECISION REQUIRED" #3** — **PARTIALLY RESOLVED (TASK-MVP-004A)**: wildcard TLS for the platform's own subdomains is confirmed sufficient for MVP (`docs/architecture/production-deployment.md`). True custom-domain-per-tenant SSL remains open/post-MVP.
+- **R52** (new, TASK-MVP-004A, CLOSED) — `CheckoutController::store()` could expose a raw, unhandled `MissingProviderCredentialsException` when Stripe is intentionally unconfigured (the recommended pilot posture) - fixed via a global exception-render handler.
 - R1 (full-page response cache tenant-safety) — config-level exposure closed (`RESPONSE_CACHE_ENABLED=false` by default), underlying `Webkul\FPC` hasher never audited — safe as long as it stays off; must be re-verified before ever enabling it.
 - R3 (PhonePe cache key) — structurally resolved via the same mechanism as everything else, never independently verified, and PhonePe (India-specific) is not a relevant gateway for this vertical/market — safe to defer indefinitely.
 - R8/R12 (Octane-related) — Octane is dormant/unconfigured and the recommendation is to keep it off through MVP — safe to defer.
@@ -124,20 +133,24 @@ Everything else in the register (R1-R48, minus the above) is RESOLVED/CLOSED wit
 
 # MVP Gaps
 
-1. **No merchant self-service signup/tenant creation.** The single largest gap — see above.
-2. **No verified shopper order flow.** Real risk of an undiscovered bug (matching the pattern of R32/R33, both found only once someone actually rendered a real page under real config).
-3. No onboarding polish (initial admin credentials are whatever `BagistoDatabaseSeeder` hardcodes today — needs to become merchant-chosen).
-4. No real-domain/production deployment posture (R20, SSL, Redis provisioning).
+1. ~~No merchant self-service signup/tenant creation.~~ **DONE (TASK-MVP-001).**
+2. ~~No verified shopper order flow.~~ **DONE (TASK-MVP-002).**
+3. ~~No onboarding polish.~~ **DONE (TASK-MVP-003 - welcome banner; owner-chosen credentials already landed in TASK-MVP-001).**
+4. **Real-domain/production deployment posture — application half DONE (TASK-MVP-004A: R20 closed, central-domain config, Stripe-unavailable UX, production-check command, runbook). Actual infrastructure (TASK-MVP-004B) not started: no real domain/server/DNS/TLS/SMTP/Redis exists anywhere outside Docker-local.**
 
 # Remaining MVP Roadmap
 
-**TASK-MVP-001 — Merchant Self-Service Signup & Automatic Provisioning.** Why: the only way a tenant exists today is a CLI command. Outcome: a public signup form creates a tenant + domain, triggers `TenantProvisioner`, and gives the merchant real, self-chosen Bagisto Admin credentials (not a hardcoded seeded default). Must also resolve R19 (validate/allowlist merchant-chosen subdomain/slug characters) as part of this task. Depends on: nothing new architecturally, reuses `TenantProvisioner`/`SubscriptionLifecycle::start()`/default plan assignment as-is. Size: L. **Blocks MVP.**
+~~TASK-MVP-001 — Merchant Self-Service Signup & Automatic Provisioning.~~ **DONE, committed, approved.**
 
-**TASK-MVP-002 — Storefront Shopper Order End-to-End Verification (and fix whatever it finds).** Why: never proven, and this codebase's history shows exactly this kind of untested path hides real bugs (R32, R33). Outcome: a real Pest test (and any fixes it surfaces) proving browse → cart → checkout → real order placed, using a real Bagisto-provided payment method (e.g. Cash on Delivery), fully isolated per tenant. Depends on: an already-provisioned tenant (TASK-MVP-001 not strictly required first, could run in either order). Size: M. **Blocks MVP.**
+~~TASK-MVP-002 — Storefront Shopper Order End-to-End Verification.~~ **DONE, committed, approved.**
 
-**TASK-MVP-003 — Merchant Store Essentials & Sane First-Run Defaults.** Why: a merchant's first login needs to land in a coherent, ready-to-sell state. Outcome: confirmed sane default channel/currency/locale, no placeholder content, "My Plan"/upgrade path visible and correct. Likely small once 001/002 exist — may fold into 001's own acceptance criteria if scope allows. Depends on: TASK-MVP-001. Size: S. **Blocks MVP.**
+~~TASK-MVP-003 — Merchant Store Essentials & First-Run Readiness.~~ **DONE, committed, approved.**
 
-**TASK-MVP-004 — Production Launch Readiness (Real Domain, Basic Hardening).** Why: testing with real external merchants means leaving Docker-local. Outcome: reachable at a real domain, `central_domains` set correctly, `trustProxies` restricted to the actual proxy (closing R20), a working HTTPS story for subdomains (wildcard cert is enough for MVP scope — resolves DECISION_LOG item 3's narrow case), real Redis provisioned. Size: M. **Blocks MVP** (for real external merchants; not blocking for continued internal/Docker testing).
+~~TASK-MVP-004 — Production Launch Readiness.~~ **Investigated (read-only), then split (see below).**
+
+**TASK-MVP-004A — Application Production Hardening.** Why: close what's fixable purely at the code/config layer without needing a real server/domain yet. Outcome: `TRUSTED_PROXIES` (closes R20 at the application level), `PLATFORM_CENTRAL_DOMAINS` (explicit, separate from `PLATFORM_BASE_DOMAIN`), a clean Stripe-unavailable checkout UX (no more raw unhandled exception), `platform:production:check`, `docs/architecture/production-deployment.md`. Depends on: nothing new architecturally. Size: S. **DONE - pending commit approval as of this review.**
+
+**TASK-MVP-004B — Actual Pilot Deployment.** Why: TASK-MVP-004A hardens the application but does not deploy it anywhere reachable by a real merchant. Outcome: a real server, real domain, real DNS, wildcard TLS, real Redis, a working SMTP fallback, a production `docker-compose.yml` (or equivalent) including the currently-missing `storage/` persistent volume, backup script + scheduling, first-production-bootstrap executed for real. Depends on: TASK-MVP-004A (done) + human decisions (real domain, hosting provider/server, whether real mail must work for the first external pilot merchant). Size: not meaningfully estimable in engineering-task terms - gated on infrastructure/ops execution, not code. **Blocks MVP** (for real external merchants; not blocking continued internal/Docker testing).
 
 **Post-MVP / explicitly deferred** (do not pull forward without a real merchant need):
 - Real (non-Stripe) payment gateway integration — explicit product-owner decision: Palestine payment options are limited, pending bank/provider coordination, not a blocker.
@@ -155,7 +168,7 @@ See the "Post-MVP / explicitly deferred" list immediately above — treat that l
 
 # Next Task
 
-**TASK-MVP-001 — Merchant Self-Service Signup & Automatic Provisioning.** This is the single biggest gap between "architecturally complete" and "a merchant can actually use this," and every other MVP task is more useful once it exists (there's no one to onboard onto a store, and no store to test a shopper order against, without a way to create a tenant that isn't an engineer typing a CLI command).
+**TASK-MVP-004B — Actual Pilot Deployment**, once TASK-MVP-004A is committed/approved and the human decisions it depends on (real domain, hosting provider/server, whether real mail must work for the first external pilot merchant) are made. Until then, this platform is architecturally MVP-complete but only reachable via Docker-local - no real external merchant can use it yet.
 
 # How To Continue In A New Chat
 

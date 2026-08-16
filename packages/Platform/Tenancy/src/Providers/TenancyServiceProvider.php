@@ -13,6 +13,7 @@ use Illuminate\Support\ServiceProvider;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\MigrateCentral;
 use Platform\Tenancy\Console\Commands\MigratePendingTenants;
+use Platform\Tenancy\Console\Commands\ProductionReadinessCheck;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Console\Commands\RepairChannelHostname;
@@ -190,6 +191,7 @@ class TenancyServiceProvider extends ServiceProvider
                 MigrateCentral::class,
                 MigratePendingTenants::class,
                 RepairChannelHostname::class,
+                ProductionReadinessCheck::class,
             ]);
         }
     }

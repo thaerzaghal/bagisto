@@ -8,8 +8,11 @@ use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Foundation\Http\Middleware\PreventRequestsDuringMaintenance;
+use Illuminate\Http\Request;
+use Platform\Billing\Exceptions\MissingProviderCredentialsException;
 use Platform\Signup\Http\Middleware\FlagFirstLoginWelcome;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
+use Platform\Tenancy\Support\EnvList;
 use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 use Stancl\Tenancy\Middleware\InitializeTenancyByDomain;
 use Webkul\Core\Http\Middleware\SecureHeaders;
@@ -156,7 +159,32 @@ return Application::configure(basePath: dirname(__DIR__))
             'billing/webhook/*',
         ]);
 
-        $middleware->trustProxies(at: '*');
+        /**
+         * TASK-MVP-004A (RISK_REGISTER.md R20): TRUSTED_PROXIES, comma-
+         * separated IP addresses/CIDR ranges (Symfony's trusted-proxy IP
+         * matching - which `Illuminate\Http\Middleware\TrustProxies`
+         * delegates to via `Request::setTrustedProxies()` - natively
+         * understands CIDR notation, so no extra parsing is needed beyond
+         * EnvList::parse()'s trim/drop-empty). Empty/unset (today's local
+         * dev default - no production value has been chosen yet) falls
+         * back to '*', preserving the EXACT previous behavior with zero
+         * required setup. A real production deployment must set this to
+         * its actual reverse proxy's IP(s) - see docs/architecture/
+         * production-deployment.md - at which point ONLY forwarded
+         * headers from those specific IPs are honored; a request that
+         * reaches the app directly, or via any other IP, gets its own
+         * real connection's host/scheme/IP instead of whatever a
+         * possibly-spoofed X-Forwarded-* header claims.
+         */
+        $trustedProxies = EnvList::parse(env('TRUSTED_PROXIES'));
+
+        $middleware->trustProxies(
+            at: $trustedProxies !== [] ? $trustedProxies : '*',
+            headers: Request::HEADER_X_FORWARDED_FOR
+                | Request::HEADER_X_FORWARDED_HOST
+                | Request::HEADER_X_FORWARDED_PORT
+                | Request::HEADER_X_FORWARDED_PROTO,
+        );
     })
     ->withSchedule(function (Schedule $schedule) {
         //
@@ -164,5 +192,31 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withExceptions(function (Exceptions $exceptions) {
         $exceptions->render(function (TenantCouldNotBeIdentifiedException $e, $request) {
             return response()->json(['message' => 'Not Found'], 404);
+        });
+
+        /**
+         * TASK-MVP-004A. `Platform\Billing\Adapters\StripePaymentProvider`
+         * throws this in its OWN constructor the moment something tries to
+         * resolve a Stripe provider instance with STRIPE_SECRET unset
+         * (deliberate, documented design - see that class's own docblock -
+         * "fail loudly at resolution time", not silently). `Platform\
+         * Billing\Http\Controllers\Tenant\CheckoutController::store()`
+         * method-injects `Platform\Billing\Services\CheckoutService`, which
+         * itself constructor-injects the `PaymentProvider` contract - so
+         * Laravel resolves (and this exception can fire) during the
+         * controller's OWN method-dependency resolution, BEFORE store()'s
+         * method body - and any try/catch inside it - ever runs. A
+         * render() handler here, the same mechanism already used a few
+         * lines above for TenantCouldNotBeIdentifiedException, is
+         * therefore the only point that can actually intercept it, without
+         * restructuring Platform\Billing's existing adapter-resolution
+         * design. By the time this fires, CheckoutService itself never
+         * finished constructing, so no Payment row was created and no
+         * Subscription/tenant plan was touched - nothing to undo.
+         */
+        $exceptions->render(function (MissingProviderCredentialsException $e, $request) {
+            session()->flash('error', 'Online subscription billing is not available yet. Please contact the platform administrator to change your plan.');
+
+            return redirect()->route('admin.saas.checkout.index');
         });
     })->create();

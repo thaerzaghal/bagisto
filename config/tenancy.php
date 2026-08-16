@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Platform\Tenancy\Models\Tenant;
+use Platform\Tenancy\Support\EnvList;
 use Stancl\Tenancy\Database\Models\Domain;
 
 return [
@@ -12,14 +13,28 @@ return [
     'domain_model' => Domain::class,
 
     /**
-     * The list of domains hosting your central app.
+     * The list of domains hosting your central app - i.e. the hosts
+     * `Platform\Admin`/`Platform\Signup`'s own `EnsureCentralDomain`
+     * middleware accept, and the hosts `Stancl\Tenancy\Middleware\
+     * InitializeTenancyByDomain` (bootstrap/app.php) will never attempt
+     * tenant resolution against.
      *
-     * Only relevant if you're using the domain or subdomain identification middleware.
+     * TASK-MVP-004A. PLATFORM_CENTRAL_DOMAINS (comma-separated) is an
+     * EXPLICIT, separate configuration source - deliberately NOT derived
+     * from `config('platform.base_domain')` (the parent hostname tenant
+     * subdomains attach to). The two are related but distinct concepts:
+     * a real deployment could legitimately run its central app on the
+     * exact same host tenants are subdomained under (`app.example.com`
+     * central + `{slug}.app.example.com` tenants) or on an entirely
+     * different one (`platform.example.com` central + `{slug}.
+     * stores.example.com` tenants) - only the operator knows which,
+     * so nothing here guesses. `127.0.0.1`/`localhost` are always kept
+     * so local development needs zero additional setup.
      */
-    'central_domains' => [
-        '127.0.0.1',
-        'localhost',
-    ],
+    'central_domains' => array_values(array_unique(array_merge(
+        ['127.0.0.1', 'localhost'],
+        EnvList::parse(env('PLATFORM_CENTRAL_DOMAINS')),
+    ))),
 
     /**
      * Tenancy bootstrappers are executed when tenancy is initialized.
