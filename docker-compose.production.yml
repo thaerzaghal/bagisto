@@ -1,0 +1,93 @@
+# TASK-MVP-004B. Production topology for a 1-5 merchant pilot - deliberately
+# separate from the local-dev docker-compose.yml (Sail), never overwrites it.
+#
+# Intended layout on the server (see docs/architecture/production-deployment.md
+# and the TASK-MVP-004B Deployment Foundation Report): this file is checked
+# out to /opt/estore/app/, with sibling directories /opt/estore/{storage,
+# mysql-data,redis-data,backups} - the relative volume paths below (`../...`)
+# resolve against THIS file's own directory, matching that layout on any
+# server that replicates it, without hardcoding an absolute path.
+#
+# No Elasticsearch/Kibana/Mailpit, no queue worker (QUEUE_CONNECTION=sync).
+# Only `web` publishes a host port, and only to 127.0.0.1 - aaPanel/Apache
+# reverse-proxies to it; MySQL/Redis are never host-published.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+      target: app
+    image: estore-app:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ../storage:/var/www/html/storage
+    networks:
+      - internal
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+      target: web
+    image: estore-web:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:80"
+    networks:
+      - internal
+    depends_on:
+      - app
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/up"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+    secrets:
+      - mysql_root_password
+    volumes:
+      - ../mysql-data:/var/lib/mysql
+      - ./docker/production/mysql-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - ../redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+networks:
+  internal:
+    driver: bridge
+
+secrets:
+  mysql_root_password:
+    file: ./secrets/mysql_root_password.txt

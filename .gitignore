@@ -4,6 +4,9 @@
 .cursor
 .env
 .env.testing
+/secrets/
+/docker/production/mysql-init/*.sql
+!/docker/production/mysql-init/*.sql.example
 .idea
 .mcp.json
 .php_cs.cache

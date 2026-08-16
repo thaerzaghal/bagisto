@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1
+#
+# TASK-MVP-004B. Platform-owned production image - deliberately NOT a reuse
+# or modification of vendor/laravel/sail/runtimes/8.3/Dockerfile (that image
+# is a dev/debug tool, bundles Xdebug and other tooling never wanted here).
+# Multi-stage, arm64-native throughout (every base image below publishes a
+# linux/arm64 manifest, verified directly against the registries before
+# this file was written - see TASK-MVP-004B's Deployment Foundation Report).
+#
+# Builds Admin + Shop Vite assets (exact commands read from each package's
+# own package.json/vite.config.js, not guessed - both write into the shared
+# root public/themes/{admin,shop}/default/build/ per their own
+# buildDirectory config) and installs Composer dependencies without dev
+# packages. Zero packages/Webkul/* modification - this file only builds
+# what already exists there.
+
+# ---- Stage 1: frontend assets (Admin + Shop themes) ----
+FROM node:20-alpine AS assets
+WORKDIR /build
+COPY . .
+RUN cd packages/Webkul/Admin && npm ci && npm run build
+RUN cd packages/Webkul/Shop && npm ci && npm run build
+
+# ---- Stage 2: Composer dependencies (no dev, optimized autoloader) ----
+FROM composer:2 AS vendor
+WORKDIR /app
+COPY . .
+RUN composer install \
+    --no-dev \
+    --no-interaction \
+    --no-progress \
+    --optimize-autoloader \
+    --no-scripts
+
+# ---- Stage 3: runtime (PHP-FPM, no Xdebug) ----
+FROM php:8.3-fpm AS app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libicu-dev \
+        libpng-dev \
+        libjpeg62-turbo-dev \
+        libfreetype6-dev \
+        libzip-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j"$(nproc)" \
+        pdo_mysql \
+        mbstring \
+        intl \
+        calendar \
+        gd \
+        opcache \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /var/www/html
+
+COPY --chown=www-data:www-data . .
+COPY --from=vendor --chown=www-data:www-data /app/vendor ./vendor
+COPY --from=assets --chown=www-data:www-data /build/public/themes ./public/themes
+
+COPY docker/production/php-production.ini /usr/local/etc/php/conf.d/zz-production.ini
+COPY docker/production/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Deliberately stays root here, matching the official php-fpm image's own
+# expected pattern: the ENTRYPOINT (root) prepares storage/ ownership, then
+# the php-fpm MASTER process itself starts as root and drops each worker to
+# www-data internally via the pool config's own user/group directives
+# (already www-data by default in this base image) - forcing USER www-data
+# at the container level here would break that privilege-drop mechanism.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["php-fpm"]
+
+# ---- Stage 4: nginx (static assets baked in at build time, not a runtime-
+# shared volume with `app` - simpler, no container-startup-order race to
+# reason about; the small extra image size from duplicating public/ across
+# the `app` and `web` images is a trivial, deliberate tradeoff for that
+# simplicity). Only ever binds 127.0.0.1:8090 at the compose level - this
+# image itself just listens on 80 inside the Docker network. ----
+FROM nginx:alpine AS web
+COPY --from=vendor /app/public /var/www/html/public
+COPY --from=assets /build/public/themes /var/www/html/public/themes
+COPY docker/production/nginx.conf /etc/nginx/conf.d/default.conf

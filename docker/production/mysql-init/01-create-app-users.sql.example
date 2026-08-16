@@ -1,0 +1,60 @@
+-- TASK-MVP-004B. TEMPLATE ONLY - copy to 01-create-app-users.sql on the
+-- server (gitignored, never committed) with real generated passwords
+-- substituted for the __PLACEHOLDER__ markers before first `docker compose
+-- up` of the mysql service (files in /docker-entrypoint-initdb.d/ only run
+-- against a genuinely empty data directory, per the official mysql image's
+-- own documented behavior - re-running compose later does NOT re-apply
+-- this file, which is the correct, expected behavior here).
+--
+-- Every grant below is derived directly from reading the real vendor code
+-- this application actually runs - not assumed:
+--   vendor/stancl/tenancy/src/TenantDatabaseManagers/MySQLDatabaseManager.php
+--     createDatabase(): CREATE DATABASE `{db}` ...
+--     deleteDatabase(): DROP DATABASE `{db}`
+--   vendor/stancl/tenancy/src/TenantDatabaseManagers/PermissionControlledMySQLDatabaseManager.php
+--     createUser(): CREATE USER `{user}`@`%` IDENTIFIED BY '...'
+--                   GRANT <PermissionControlledMySQLDatabaseManager::$grants> ON `{db}`.* TO `{user}`@`%`
+--     deleteUser(): DROP USER IF EXISTS '{user}'
+-- Tenant database names are always `tenant{id}` (config/tenancy.php
+-- 'prefix' => 'tenant', 'suffix' => ''), so every grant below that can be
+-- scoped is scoped to the `tenant%` pattern - never a bare `*.*` - except
+-- CREATE USER, which MySQL has no way to scope below the global level at
+-- all (there is no per-database-pattern CREATE USER privilege in MySQL's
+-- model).
+
+-- A. Central application user - DML+DDL on the central database ONLY.
+-- DDL is included so this same user can run `platform:migrate:central`/
+-- `platform:plans:seed` during deploys, without a second migration-only
+-- credential, while never touching any other database (including tenant
+-- databases, which this user has zero privileges on).
+CREATE USER 'estore_app'@'%' IDENTIFIED BY '__APP_PASSWORD__';
+GRANT ALL PRIVILEGES ON `bagisto_central`.* TO 'estore_app'@'%';
+
+-- B. Tenant provisioning user - used ONLY by Platform\Tenancy\Services\
+-- TenantProvisioner (config/database.php 'tenant_provisioning' connection),
+-- never by the application's own ordinary request path. NOT root, NOT
+-- global ALL PRIVILEGES - scoped to exactly what the real code above does.
+CREATE USER 'estore_provisioner'@'%' IDENTIFIED BY '__PROVISION_PASSWORD__';
+
+-- CREATE DATABASE/DROP DATABASE for anything matching the tenant{id}
+-- naming convention - MySQL's db-level privilege matching supports the
+-- % wildcard in the db_name position, so this does NOT need to be global.
+GRANT CREATE, DROP ON `tenant%`.* TO 'estore_provisioner'@'%';
+
+-- CREATE USER/DROP USER (via CreatesDatabaseUsers::deleteUser()'s `DROP
+-- USER IF EXISTS`) - MySQL has no scoped equivalent of this privilege;
+-- it is unavoidably global by MySQL's own design, not a choice made here.
+GRANT CREATE USER ON *.* TO 'estore_provisioner'@'%';
+
+-- The exact same grant list PermissionControlledMySQLDatabaseManager::
+-- $grants hands to each newly created tenant user, scoped to `tenant%`,
+-- WITH GRANT OPTION only on that same scoped pattern (never globally) -
+-- this is what lets the provisioning user execute its own `GRANT ... TO
+-- {tenant_user}` statement (MySQL requires the granting user to already
+-- hold, with GRANT OPTION, every privilege it hands to someone else).
+GRANT ALTER, ALTER ROUTINE, CREATE, CREATE ROUTINE, CREATE TEMPORARY TABLES,
+      CREATE VIEW, DELETE, DROP, EVENT, EXECUTE, INDEX, INSERT, LOCK TABLES,
+      REFERENCES, SELECT, SHOW VIEW, TRIGGER, UPDATE
+  ON `tenant%`.* TO 'estore_provisioner'@'%' WITH GRANT OPTION;
+
+FLUSH PRIVILEGES;
