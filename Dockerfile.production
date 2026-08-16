@@ -15,47 +15,79 @@
 # what already exists there.
 
 # ---- Stage 1: frontend assets (Admin + Shop themes) ----
+# `npm install`, not `npm ci` - confirmed via `git ls-files` that no
+# package-lock.json exists anywhere in this repo (upstream Bagisto never
+# committed one for any package), so `ci` (which requires a lock file) can
+# never succeed here; `install` is the correct command for this repo's
+# actual state, not a fallback/workaround.
 FROM node:20-alpine AS assets
 WORKDIR /build
 COPY . .
-RUN cd packages/Webkul/Admin && npm ci && npm run build
-RUN cd packages/Webkul/Shop && npm ci && npm run build
+RUN cd packages/Webkul/Admin && npm install && npm run build
+RUN cd packages/Webkul/Shop && npm install && npm run build
 
-# ---- Stage 2: Composer dependencies (no dev, optimized autoloader) ----
-FROM composer:2 AS vendor
-WORKDIR /app
-COPY . .
+# ---- Stage 2: runtime + Composer install (PHP-FPM, no Xdebug) ----
+# `composer install` deliberately runs INSIDE this stage, against the SAME
+# PHP 8.3 + extension set the app actually runs under - NOT in the generic
+# `composer:2` image (that image bundles its own unrelated PHP CLI, which
+# in practice resolved to 8.5.x with none of this app's required extensions
+# compiled in, so composer's own platform-requirement check rejected the
+# entire lock file - found empirically during TASK-MVP-004B's first real
+# build, not a hypothetical). The `composer` BINARY is still taken from
+# that image (COPY --from) - only the interpreter running it changes.
+FROM php:8.3-fpm AS app
+
+# Extension set matches the one already proven correct for this exact
+# codebase - Bagisto's OWN pre-existing (unrelated to this task)
+# docker/production/nginx/Dockerfile installs bcmath/calendar/curl/exif/
+# gd/gmp/intl/mbstring/pdo_mysql+mysqli/soap/sockets/xml/zip via system
+# packages; this stage needs the same SET via docker-php-ext-install
+# instead, since it compiles from the official php:8.3-fpm image rather
+# than installing prebuilt Ubuntu php8.3-* packages. imagick deliberately
+# omitted - intervention/image (this app's real dependency) works with gd
+# alone, and nothing in composer.lock's actual platform requirements ever
+# demanded it (unlike bcmath/zip, which real composer install failures
+# during this task's own build DID prove necessary - not guessed).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libicu-dev \
+        libonig-dev \
+        libpng-dev \
+        libjpeg62-turbo-dev \
+        libfreetype6-dev \
+        libzip-dev \
+        libgmp-dev \
+        libxml2-dev \
+        libcurl4-openssl-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j"$(nproc)" \
+        pdo_mysql \
+        mysqli \
+        mbstring \
+        intl \
+        calendar \
+        bcmath \
+        gd \
+        gmp \
+        exif \
+        soap \
+        sockets \
+        zip \
+        opcache \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+
+COPY --chown=www-data:www-data . .
+COPY --from=assets --chown=www-data:www-data /build/public/themes ./public/themes
+
 RUN composer install \
     --no-dev \
     --no-interaction \
     --no-progress \
     --optimize-autoloader \
     --no-scripts
-
-# ---- Stage 3: runtime (PHP-FPM, no Xdebug) ----
-FROM php:8.3-fpm AS app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libicu-dev \
-        libpng-dev \
-        libjpeg62-turbo-dev \
-        libfreetype6-dev \
-        libzip-dev \
-    && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j"$(nproc)" \
-        pdo_mysql \
-        mbstring \
-        intl \
-        calendar \
-        gd \
-        opcache \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /var/www/html
-
-COPY --chown=www-data:www-data . .
-COPY --from=vendor --chown=www-data:www-data /app/vendor ./vendor
-COPY --from=assets --chown=www-data:www-data /build/public/themes ./public/themes
 
 COPY docker/production/php-production.ini /usr/local/etc/php/conf.d/zz-production.ini
 COPY docker/production/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -70,13 +102,16 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["php-fpm"]
 
-# ---- Stage 4: nginx (static assets baked in at build time, not a runtime-
+# ---- Stage 3: nginx (static assets baked in at build time, not a runtime-
 # shared volume with `app` - simpler, no container-startup-order race to
 # reason about; the small extra image size from duplicating public/ across
 # the `app` and `web` images is a trivial, deliberate tradeoff for that
 # simplicity). Only ever binds 127.0.0.1:8090 at the compose level - this
-# image itself just listens on 80 inside the Docker network. ----
+# image itself just listens on 80 inside the Docker network. Sources its
+# public/ from the `app` stage - by that point in `app`'s own build it
+# already contains both the composer-installed vendor-dependent files and
+# the Vite-built theme assets merged in, so `web` needs no composer/node
+# tooling of its own at all. ----
 FROM nginx:alpine AS web
-COPY --from=vendor /app/public /var/www/html/public
-COPY --from=assets /build/public/themes /var/www/html/public/themes
+COPY --from=app /var/www/html/public /var/www/html/public
 COPY docker/production/nginx.conf /etc/nginx/conf.d/default.conf

@@ -22,6 +22,13 @@
 -- all (there is no per-database-pattern CREATE USER privilege in MySQL's
 -- model).
 
+-- Central database itself - GRANT statements on a not-yet-existing
+-- database are syntactically valid in MySQL (the grant just stays dormant
+-- until the database exists), which silently masked this being missing
+-- during this file's own first real deployment (TASK-MVP-004B) - the
+-- database must be explicitly created, not assumed to exist.
+CREATE DATABASE IF NOT EXISTS `bagisto_central` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 -- A. Central application user - DML+DDL on the central database ONLY.
 -- DDL is included so this same user can run `platform:migrate:central`/
 -- `platform:plans:seed` during deploys, without a second migration-only
