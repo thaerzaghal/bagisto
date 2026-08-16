@@ -16,3 +16,13 @@ tests
 docs
 *.md
 .phpunit.cache
+# TASK-MVP-004B - found empirically, not hypothetical: the Docker build
+# context is the /opt/estore/app/ deployment directory itself, which is
+# also where the server-only secrets/ directory and the real (non-.example)
+# mysql-init SQL file live, sitting alongside the tracked source. Without
+# these exclusions, `COPY . .` bakes real database passwords directly into
+# the estore-app image's filesystem layers - confirmed live via
+# `docker run --rm estore-app find / -iname '*mysql_root_password*'`
+# finding the file inside a freshly built image before this fix.
+secrets/
+docker/production/mysql-init/*.sql
