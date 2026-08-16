@@ -128,8 +128,13 @@ Every task closed with a full evidence-based report (real HTTP requests, real My
 - R8/R12 (Octane-related) — Octane is dormant/unconfigured and the recommendation is to keep it off through MVP — safe to defer.
 - R13 (Sanctum/API guard unused) — no API planned for MVP — safe to defer.
 - R38 (product-limit count-then-create race) — documented, no evidence of concurrent-creation as a realistic pattern for a small pilot — safe to defer.
+- R49 (long-suite-duration real-worker/queue-draining test flake) — development/test-infrastructure only, reproduced and root-caused as environment-timing-related, not a Platform/tenancy defect — safe to defer.
+- R50 (abandoned `booted()`-callback middleware-attachment technique for one specific route) — development-only, the shipped welcome-banner feature does not depend on it — safe to defer.
+- R51 (Vite manifest gap for two Admin-theme placeholder assets, TASK-MVP-003) — **re-checked fresh during the MVP final readiness review (2026-08-16) and found NOT REPRODUCIBLE**: both `src/Resources/assets/images/product-placeholders/front.svg` and `.../icon-add-product.svg` resolve correctly through the real, currently-committed `public/themes/admin/default/build/manifest.json` (verified live via a direct `Vite::asset()` call in the same Docker test environment - no exception). Whatever caused the original observation is no longer present; recommend closing outright rather than carrying as an open risk. If it resurfaces during TASK-MVP-004B, a normal `npm run build` for the Admin theme is the correct fix, not an application code change.
 
-Everything else in the register (R1-R48, minus the above) is RESOLVED/CLOSED with live evidence.
+Everything else in the register (R1-R52, minus the above) is RESOLVED/CLOSED with live evidence.
+
+**MVP final readiness review (2026-08-16)**: no application-level blocker found. See the "MVP FINAL READINESS REPORT" delivered at this checkpoint for the full journey-by-journey evidence (merchant onboarding, merchant operations, shopper checkout, Platform Owner - all READY FOR PILOT), the mail-under-`sync` investigation (order placement succeeds independently of mail delivery - `Webkul\Shop\Listeners\Base::prepareMail()` and `Webkul\Shop\Listeners\Order::afterCreated()` both already catch and log any mail exception, including an unconfigured-SMTP `RuntimeException`, without affecting the HTTP response - confirmed via direct source reading of Bagisto's own unmodified code, a structural guarantee, not merely observed behavior), and the R51 re-check above. **Application MVP feature scope is now frozen for the pilot** - see "Post-MVP / explicitly deferred" below for what requires a new product decision before being pulled back in. Remaining work is entirely TASK-MVP-004B (infrastructure/deployment), not further application development.
 
 # MVP Gaps
 
@@ -137,6 +142,8 @@ Everything else in the register (R1-R48, minus the above) is RESOLVED/CLOSED wit
 2. ~~No verified shopper order flow.~~ **DONE (TASK-MVP-002).**
 3. ~~No onboarding polish.~~ **DONE (TASK-MVP-003 - welcome banner; owner-chosen credentials already landed in TASK-MVP-001).**
 4. **Real-domain/production deployment posture — application half DONE (TASK-MVP-004A: R20 closed, central-domain config, Stripe-unavailable UX, production-check command, runbook). Actual infrastructure (TASK-MVP-004B) not started: no real domain/server/DNS/TLS/SMTP/Redis exists anywhere outside Docker-local.**
+
+**Application MVP development is complete.** The 2026-08-16 final readiness review found zero application-level blockers across every real MVP journey (merchant onboarding, merchant operations, shopper checkout, Platform Owner). Everything remaining is TASK-MVP-004B infrastructure/deployment work, not further coding.
 
 # Remaining MVP Roadmap
 
