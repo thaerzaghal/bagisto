@@ -166,6 +166,34 @@ test('G. a non-Ready (Pending) tenant still follows TenantAccessGate 503 semanti
     expect(tenancy()->initialized)->toBeFalse();
 });
 
+test('I. a non-central host hitting a Platform Admin central-only route gets a clean 404 under APP_DEBUG=false, never a 500 (RISK_REGISTER.md R54)', function () {
+    // Reproduces the exact scenario that surfaced this sibling bug: a
+    // spoofed/unrecognized Host reaching Platform\Admin\Http\Middleware\
+    // EnsureCentralDomain, which used to `throw new NotFoundHttpException`
+    // - fine under APP_DEBUG=true, but rendered via Bagisto's own
+    // handleHttpException() catch-all under APP_DEBUG=false, which falls
+    // back to `shop::errors.index` when `shop::errors.404` doesn't exist -
+    // a view that unconditionally queries the tenant-scoped `locales`
+    // table, absent on the central connection this rejected request never
+    // left. Fixed by returning the 404 response directly, no exception at
+    // all - see EnsureCentralDomain's own docblock.
+    $response = $this->get('http://non-central-probe.localhost/platform/login');
+
+    $response->assertStatus(404);
+    $response->assertJsonStructure(['message']);
+
+    $body = $response->getContent();
+    expect($body)->not->toContain('Exception');
+    expect($body)->not->toContain('locales');
+});
+
+test('J. a non-central host hitting the Signup central-only route gets a clean 404 under APP_DEBUG=false, never a 500 (RISK_REGISTER.md R54)', function () {
+    $response = $this->get('http://non-central-probe.localhost/join');
+
+    $response->assertStatus(404);
+    $response->assertJsonStructure(['message']);
+});
+
 test('H. a generic, unrelated application exception on a resolved tenant is NOT swallowed or converted into a tenancy 404', function () {
     // Proves the $onFail hook (TenancyServiceProvider::
     // handleUnresolvedTenantDomains()) is narrowly scoped to

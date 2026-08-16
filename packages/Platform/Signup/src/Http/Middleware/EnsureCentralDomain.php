@@ -6,12 +6,13 @@ namespace Platform\Signup\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
  * TASK-MVP-001. Deliberately a small, self-contained duplicate of
  * `Platform\Admin\Http\Middleware\EnsureCentralDomain` (byte-for-byte
- * identical logic - a host check against `config('tenancy.central_domains')`),
+ * identical logic - a host check against `config('tenancy.central_domains')`,
+ * including TASK-MVP-004B/RISK_REGISTER.md R54's fix - see that class's
+ * own docblock for the full root cause),
  * not a reuse of that class. The task's own instruction was to keep
  * `Platform\Signup` dependent ONLY on `Platform\Tenancy` unless another
  * dependency proves genuinely required - importing this one from
@@ -37,7 +38,7 @@ class EnsureCentralDomain
     public function handle(Request $request, Closure $next)
     {
         if (! in_array($request->getHost(), config('tenancy.central_domains', []), true)) {
-            throw new NotFoundHttpException;
+            return response()->json(['message' => 'Not Found'], 404);
         }
 
         return $next($request);

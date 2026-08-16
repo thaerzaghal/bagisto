@@ -54,8 +54,17 @@ test('B. EnvList::parse splits, trims, and drops empty entries from a comma-sepa
     expect(EnvList::parse('10.0.0.0/8, 172.16.0.0/12'))->toBe(['10.0.0.0/8', '172.16.0.0/12']);
 });
 
-// C: forwarded HTTPS/host behavior works through a trusted proxy.
-test('C. forwarded proto/host from a TRUSTED proxy IP is honored', function () {
+// C: forwarded HTTPS behavior works through a trusted proxy; forwarded
+// Host is deliberately NEVER honored (TASK-MVP-004B, RISK_REGISTER.md R55)
+// - see bootstrap/app.php's own docblock for the full reasoning. This
+// codebase's real production reverse-proxy config always sets
+// `ProxyPreserveHost On`, so the raw Host header is already correct and
+// tamper-proof; trusting X-Forwarded-Host on top of that only added a
+// real spoofing vector (mod_proxy merges rather than replaces a
+// client-supplied value, and Symfony's trusted-header resolution reads
+// the client-supplied entry first) with no corresponding benefit for this
+// single-hop topology.
+test('C. forwarded proto from a TRUSTED proxy IP is honored; forwarded Host is never honored, from any IP', function () {
     TrustProxies::at(['203.0.113.5']);
 
     $response = $this->call('GET', 'http://localhost/__test/trusted-proxy-probe', [], [], [], [
@@ -66,11 +75,11 @@ test('C. forwarded proto/host from a TRUSTED proxy IP is honored', function () {
 
     $response->assertOk();
     expect($response->json('secure'))->toBeTrue();
-    expect($response->json('host'))->toBe('app.example.test');
+    expect($response->json('host'))->toBe('localhost');
 });
 
 // D: spoofed forwarded headers from an untrusted source are not honored.
-test('D. forwarded proto/host from an UNTRUSTED IP are ignored - real connection values are used instead', function () {
+test('D. forwarded proto from an UNTRUSTED IP is ignored - real connection value is used instead; forwarded Host is still never honored', function () {
     TrustProxies::at(['203.0.113.5']);
 
     $response = $this->call('GET', 'http://localhost/__test/trusted-proxy-probe', [], [], [], [
@@ -84,7 +93,7 @@ test('D. forwarded proto/host from an UNTRUSTED IP are ignored - real connection
     expect($response->json('host'))->toBe('localhost');
 });
 
-test('A(behavioral). with the app booted under its actual (unset TRUSTED_PROXIES) local test config, forwarded headers are honored from any IP - matching today\'s "*" behavior', function () {
+test('A(behavioral). with the app booted under its actual (unset TRUSTED_PROXIES) local test config, forwarded proto is honored from any IP - matching today\'s "*" behavior; forwarded Host is still never honored', function () {
     // Deliberately does NOT call TrustProxies::at() - exercises whatever
     // bootstrap/app.php itself configured at real application boot from
     // the actual (TRUSTED_PROXIES-unset) test environment, proving local
@@ -97,5 +106,5 @@ test('A(behavioral). with the app booted under its actual (unset TRUSTED_PROXIES
 
     $response->assertOk();
     expect($response->json('secure'))->toBeTrue();
-    expect($response->json('host'))->toBe('anything.example.test');
+    expect($response->json('host'))->toBe('localhost');
 });

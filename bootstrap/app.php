@@ -175,13 +175,46 @@ return Application::configure(basePath: dirname(__DIR__))
          * reaches the app directly, or via any other IP, gets its own
          * real connection's host/scheme/IP instead of whatever a
          * possibly-spoofed X-Forwarded-* header claims.
+         *
+         * TASK-MVP-004B (RISK_REGISTER.md R55): HEADER_X_FORWARDED_HOST
+         * deliberately dropped from the trusted set - Host resolution
+         * relies solely on the raw `Host` request header instead. Found
+         * live on the real pilot deployment's Apache edge: with
+         * `ProxyPass ... ProxyPreserveHost On` (the real production
+         * reverse-proxy config - see docs/architecture/
+         * production-deployment.md), the raw Host header Laravel receives
+         * is ALREADY the exact Host Apache's own vhost matched the
+         * request against, immune to header spoofing by construction (a
+         * client can influence which of OUR vhosts gets matched only by
+         * sending a Host our ServerAlias actually lists, at which point
+         * "spoofing" is meaningless - it just becomes a normal request for
+         * that host). Trusting X-Forwarded-Host on top of that added a
+         * real, exploitable gap with no corresponding benefit for this
+         * single-hop topology: `mod_proxy_http` merges (comma-appends)
+         * its own detected value onto whatever a client already sent
+         * rather than replacing it, and Symfony's trusted-header
+         * resolution for X-Forwarded-Host reads the FIRST (client-supplied,
+         * spoofable) entry, not the last (proxy-appended, real) one -
+         * confirmed live: a real external request to
+         * `app.technify.dev/platform/login` carrying a forged
+         * `X-Forwarded-Host: evil-spoofed.example.com` header caused
+         * `EnsureCentralDomain` to reject the request as non-central
+         * (`$request->getHost()` had resolved to the forged value), which
+         * is what surfaced R54. Rewriting X-Forwarded-Host at the Apache
+         * layer to a trusted value was attempted first but abandoned -
+         * `RequestHeader set ... "%{Host}i"` did not evaluate as
+         * documented on this server's Apache/mod_headers build (produced
+         * a literal `i=<counter>` value instead of the Host header content)
+         * - not something worth fighting when simply not trusting the
+         * header at all is both simpler and strictly safer for this
+         * topology. X-Forwarded-For/Proto/Port remain trusted - none of
+         * them can override which vhost/tenant a request resolves to.
          */
         $trustedProxies = EnvList::parse(env('TRUSTED_PROXIES'));
 
         $middleware->trustProxies(
             at: $trustedProxies !== [] ? $trustedProxies : '*',
             headers: Request::HEADER_X_FORWARDED_FOR
-                | Request::HEADER_X_FORWARDED_HOST
                 | Request::HEADER_X_FORWARDED_PORT
                 | Request::HEADER_X_FORWARDED_PROTO,
         );
