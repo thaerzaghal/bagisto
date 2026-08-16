@@ -8,6 +8,7 @@ use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Foundation\Http\Middleware\PreventRequestsDuringMaintenance;
+use Platform\Signup\Http\Middleware\FlagFirstLoginWelcome;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
 use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 use Stancl\Tenancy\Middleware\InitializeTenancyByDomain;
@@ -119,6 +120,25 @@ return Application::configure(basePath: dirname(__DIR__))
          */
         $middleware->prependToGroup('web', [
             TenantAccessGate::class,
+        ]);
+
+        /**
+         * TASK-MVP-003. Appended (not prepended) to 'web' so it runs
+         * AFTER StartSession/VerifyCsrfToken (both already part of
+         * 'web'), guaranteeing session() is ready to write to. Its own
+         * body is a no-op for every request except the one whose
+         * CURRENT route is genuinely `admin.session.create` (Bagisto's
+         * tenant Admin login page) with `?welcome=1` present - see
+         * Platform\Signup\Http\Middleware\FlagFirstLoginWelcome's own
+         * docblock for why this needed to be a 'web'-group member
+         * rather than the R25-style per-route attachment this package
+         * first attempted (which does not work for this specific route,
+         * for reasons only partially isolated - RISK_REGISTER.md R50).
+         * Runs on every Shop/tenant-Admin request - never Platform
+         * Admin, which uses the entirely separate 'platform' group.
+         */
+        $middleware->appendToGroup('web', [
+            FlagFirstLoginWelcome::class,
         ]);
 
         $middleware->validateCsrfTokens(except: [

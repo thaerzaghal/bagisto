@@ -73,6 +73,7 @@ class TenantProvisioner
             $this->ensureFilesystemPrepared($tenant);
             $this->ensureMigrated($tenant);
             $this->ensureSeeded($tenant);
+            $this->ensureChannelHostnameCorrect($tenant);
             $this->ensureInitialSubscriptionStarted($tenant);
             $this->ensureOwnerAdminSeeded($tenant, $ownerAdmin);
 
@@ -179,6 +180,23 @@ class TenantProvisioner
     }
 
     /**
+     * TASK-MVP-003 (RISK_REGISTER.md/DECISION_LOG.md): re-run the channel-
+     * hostname correctness step against an ALREADY-READY tenant, bypassing
+     * provision()'s own early return - the repair mechanism for tenants
+     * provisioned before this step existed. Mirrors remigrate()'s exact
+     * shape/contract: safe to call on any tenant regardless of status
+     * (though `Platform\Tenancy\Console\Commands\RepairChannelHostname`,
+     * the command that exposes this, deliberately only ever calls it for
+     * Ready tenants - see that command's own docblock for why), any
+     * number of times, touches nothing except the one `channels.hostname`
+     * column.
+     */
+    public function repairChannelHostname(Tenant $tenant): void
+    {
+        $this->ensureChannelHostnameCorrect($tenant);
+    }
+
+    /**
      * Step 3: run every Bagisto package migration (discovered dynamically,
      * not a maintained list - see docs/architecture/provisioning.md "Bagisto
      * tenant migration strategy") plus anything under database/migrations/tenant,
@@ -218,6 +236,84 @@ class TenantProvisioner
             }
 
             Artisan::call('db:seed', ['--force' => true]);
+        });
+    }
+
+    /**
+     * TASK-MVP-003. `Webkul\Installer\Database\Seeders\Core\ChannelTableSeeder`
+     * always seeds the tenant's one default channel (id=1) with
+     * `hostname = config('app.url')` - the CENTRAL app's own URL, never
+     * this tenant's own domain (there is no per-tenant concept in that
+     * seeder at all). This step corrects it to the tenant's real primary
+     * domain, resolved from the central `Tenant`/`Domain` data (never
+     * guessed from the tenant id) - the only real consumers found
+     * (`Webkul\Shop\Http\Controllers\SitemapController`,
+     * `Webkul\Sitemap\Jobs\ProcessSitemap`, both via `sitemap.xml`/
+     * `robots.txt` generation) would otherwise silently advertise the
+     * platform's own central domain instead of the merchant's store.
+     *
+     * FORMAT, verified from Bagisto source, not assumed: a BARE hostname
+     * (no scheme) - confirmed three ways: (1) the Admin form field is
+     * literally labelled "Host Name" with a plain `unique:channels,
+     * hostname` validation rule, no `url:` rule; (2) `Webkul\Core\Core::
+     * getCurrentChannel()`'s own hostname lookup explicitly checks THREE
+     * candidate values - the bare hostname, `http://`+hostname, and
+     * `https://`+hostname - proving the bare form is a first-class,
+     * correctly-handled value, not a degraded one; (3) both real
+     * consumers (`SitemapController::channelBaseUrl()`, `ProcessSitemap::
+     * channelBaseUrl()`) already normalize a schemeless value to
+     * `https://` themselves before using it as a URL base - storing a
+     * scheme here would be redundant at best and would hardcode a
+     * scheme decision (this environment currently serves tenants over
+     * plain `http://` locally) this step has no business making. This is
+     * exactly why the earlier TASK-MVP-003 plan's "prefixed with the
+     * correct scheme" assumption was verified and NOT implemented -
+     * writing the bare domain is both simpler and the only choice that
+     * doesn't bake in a possibly-wrong scheme for the eventual real
+     * (TASK-MVP-004) production domain.
+     *
+     * Targets `channels.id = 1` (the one channel every tenant has -
+     * `ChannelTableSeeder`'s own hardcoded id) and ONLY the `hostname`
+     * column - no other channel field is read or written, so this can
+     * never disturb a merchant's own locale/currency/theme/design
+     * configuration. Idempotent (a plain conditional `UPDATE`, safe to
+     * repeat any number of times) and side-effect-free if the domain is
+     * already correct.
+     *
+     * No domain is guessed from `$tenant->getTenantKey()` - the real
+     * `Domain` row (created once, at tenant-creation time, by whichever
+     * caller created this tenant - CLI, Platform Admin, or `Platform\
+     * Signup`) is the only source of truth. A tenant with no domain row
+     * at all (should never happen by the time provision() reaches this
+     * step - every tenant-creation call site creates its domain in the
+     * same transaction as the tenant row) is treated as a hard failure,
+     * matching this class's established "fail loudly, don't guess"
+     * convention (see ensureInitialSubscriptionStarted()'s own missing-
+     * plan case).
+     */
+    protected function ensureChannelHostnameCorrect(Tenant $tenant): void
+    {
+        $domain = $tenant->domains()->orderBy('id')->value('domain');
+
+        if (! $domain) {
+            throw new RuntimeException(
+                "Cannot correct channel hostname: tenant [{$tenant->getTenantKey()}] has no domain record."
+            );
+        }
+
+        $tenant->run(function () use ($domain) {
+            if (! Schema::hasTable('channels')) {
+                throw new RuntimeException(
+                    'Cannot correct channel hostname: channels table does not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            DB::table('channels')
+                ->where('id', 1)
+                ->where(function ($query) use ($domain) {
+                    $query->whereNull('hostname')->orWhere('hostname', '!=', $domain);
+                })
+                ->update(['hostname' => $domain]);
         });
     }
 

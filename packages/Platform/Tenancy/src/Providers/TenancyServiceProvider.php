@@ -15,6 +15,7 @@ use Platform\Tenancy\Console\Commands\MigrateCentral;
 use Platform\Tenancy\Console\Commands\MigratePendingTenants;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
+use Platform\Tenancy\Console\Commands\RepairChannelHostname;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
 use Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema;
@@ -188,6 +189,7 @@ class TenancyServiceProvider extends ServiceProvider
                 ReindexTenant::class,
                 MigrateCentral::class,
                 MigratePendingTenants::class,
+                RepairChannelHostname::class,
             ]);
         }
     }
