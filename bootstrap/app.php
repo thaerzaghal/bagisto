@@ -190,6 +190,22 @@ return Application::configure(basePath: dirname(__DIR__))
         //
     })
     ->withExceptions(function (Exceptions $exceptions) {
+        /**
+         * TASK-MVP-004B (RISK_REGISTER.md R51): DEFENSE-IN-DEPTH ONLY as of
+         * this task - the primary interception point is now
+         * Platform\Tenancy\Providers\TenancyServiceProvider::
+         * handleUnresolvedTenantDomains(), which sets Stancl\Tenancy\
+         * Middleware\InitializeTenancyByDomain::$onFail so the exception
+         * never reaches this handler at all for the normal 'web' HTTP path.
+         * This registration stays in place for any other path that might
+         * still funnel the exception into Laravel's own exception-handler
+         * pipeline directly - but under APP_DEBUG=false it was proven to
+         * silently lose a registration-order race against Webkul\Core\
+         * Exceptions\Handler's own catch-all `Throwable` renderable (see
+         * that provider method's own docblock for the full, source-verified
+         * root cause). Do not rely on this alone for anything reachable via
+         * the 'web' middleware group.
+         */
         $exceptions->render(function (TenantCouldNotBeIdentifiedException $e, $request) {
             return response()->json(['message' => 'Not Found'], 404);
         });

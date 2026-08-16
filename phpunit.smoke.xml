@@ -16,6 +16,17 @@
     docs/implementation/ci-testing.md "Production-config smoke lane" for the
     one deliberate exception - QUEUE_CONNECTION - and why).
 
+    TASK-MVP-004B (RISK_REGISTER.md R51): APP_DEBUG=false was added to this
+    list after a real production bug (an unknown Host header producing a raw
+    500 instead of a clean 404) was found live during the pilot deployment,
+    reproducible ONLY under APP_DEBUG=false - no test file anywhere in this
+    repo's prior history pinned that value either way, so it silently
+    inherited whatever the ambient environment's real .env happened to have
+    (APP_DEBUG=true throughout this whole engagement's local/CI history),
+    masking the bug exactly like R29/R33 masked theirs. This is now one of
+    the production-intended values this lane exists to prove, alongside the
+    four above.
+
     Usage: vendor/bin/pest -c phpunit.smoke.xml
     (never `vendor/bin/pest tests/Feature/PlatformSmoke` alone - that would
     run under phpunit.xml's default <php> block instead, silently
@@ -43,6 +54,7 @@
 
     <php>
         <env name="APP_ENV" value="testing"/>
+        <env name="APP_DEBUG" value="false"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="MAIL_MAILER" value="array"/>

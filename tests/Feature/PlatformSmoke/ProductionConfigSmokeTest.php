@@ -237,3 +237,22 @@ test('9. central database destructive-command safeguard remains active under pro
     expect($wipeProperty->getValue())->toBe($shouldBeProhibited);
     expect($freshProperty->getValue())->toBe($shouldBeProhibited);
 });
+
+/**
+ * TASK-MVP-004B (RISK_REGISTER.md R51). Unlike
+ * tests/Feature/Platform/ProductionHostErrorHandlingTest.php (which forces
+ * APP_DEBUG=false via a runtime config() override to test the fix in
+ * isolation), this test relies entirely on THIS FILE'S OWN real,
+ * env-driven APP_DEBUG=false (phpunit.smoke.xml's own <env> block, added
+ * alongside this test) - proving the fix holds under the same
+ * production-config smoke lane that already proves SESSION_DRIVER=database/
+ * CACHE_STORE=redis/QUEUE_CONNECTION=redis/RESPONSE_CACHE_ENABLED=false
+ * don't silently break the golden path, closing the exact gap (no test
+ * anywhere pinned APP_DEBUG=false at all) that let this bug reach a real
+ * pilot deployment before being caught.
+ */
+test('10. an unknown Host header returns a clean 404, never a 500, under this lane\'s real APP_DEBUG=false', function () {
+    $response = $this->get('http://does-not-exist.smoke-probe.localhost/');
+
+    $response->assertStatus(404);
+});

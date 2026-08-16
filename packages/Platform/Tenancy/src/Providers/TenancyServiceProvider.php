@@ -156,6 +156,7 @@ class TenancyServiceProvider extends ServiceProvider
         $this->attachTenancyToImageCacheRoute();
         $this->makeTenancyMiddlewareHighestPriority();
         $this->registerCommands();
+        $this->handleUnresolvedTenantDomains();
 
         // INCIDENT-001. Must run before any command's handle() executes -
         // every provider's boot() runs before the console Kernel dispatches
@@ -305,5 +306,75 @@ class TenancyServiceProvider extends ServiceProvider
         foreach (array_reverse($tenancyMiddleware) as $middleware) {
             $this->app[\Illuminate\Contracts\Http\Kernel::class]->prependToMiddlewarePriority($middleware);
         }
+    }
+
+    /**
+     * TASK-MVP-004B (RISK_REGISTER.md R51). Fixes a real production bug
+     * found during the pilot deployment: under APP_DEBUG=false, an unknown
+     * Host header produced a raw 500 instead of the clean 404 bootstrap/app.php
+     * already tries to configure via `$exceptions->render(TenantCouldNotBeIdentifiedException
+     * ::class, ...)`.
+     *
+     * ROOT CAUSE (confirmed by reading the actual framework/vendor source,
+     * not assumed): Illuminate\Foundation\Exceptions\Handler::__construct()
+     * calls $this->register() synchronously, DURING construction. Since
+     * Webkul\Core\Providers\CoreServiceProvider binds (not singletons)
+     * ExceptionHandler::class to Webkul\Core\Exceptions\Handler, and that
+     * class's own register() only registers a catch-all `Throwable`
+     * renderable when config('app.debug') is false, its callback always
+     * gets added to the handler's renderCallbacks list DURING construction -
+     * before bootstrap/app.php's own `$exceptions->render(...)` closure ever
+     * runs (that one only fires via the container's afterResolving() hook,
+     * which necessarily happens AFTER construction completes -
+     * Illuminate\Foundation\Configuration\ApplicationBuilder::withExceptions()).
+     * Illuminate\Foundation\Exceptions\Handler::renderViaCallbacks() returns
+     * the FIRST type-match in registration order, and Bagisto's callback
+     * matches the universal `Throwable` type - so it always wins that race
+     * under APP_DEBUG=false, downgrading what should be a clean 404 into
+     * Bagisto's generic `shop::errors.500` view, which itself needs tenant
+     * tables that were never initialized for an unresolved host - producing
+     * a raw 500-on-500. This was never caught earlier in this engagement
+     * because every prior test/local run used APP_DEBUG=true, under which
+     * Webkul\Core\Exceptions\Handler::register() early-returns and never
+     * registers anything at all.
+     *
+     * FIX: rather than trying to out-race that registration-order problem
+     * inside Laravel's exception-handler pipeline, this sidesteps it
+     * entirely by using stancl/tenancy's own purpose-built extension point.
+     * Stancl\Tenancy\Middleware\IdentificationMiddleware::initializeTenancy()
+     * (the base class InitializeTenancyByDomain extends) already wraps its
+     * own tenant resolution in a try/catch keyed on exactly this exception,
+     * and calls `static::$onFail` when it fires - left unset, that defaults
+     * to `fn ($e) => throw $e`, which is what put the exception on the race
+     * course above in the first place. Setting InitializeTenancyByDomain's
+     * OWN static $onFail here intercepts the failure at its actual source,
+     * before it is ever thrown into the exception-handler pipeline - so the
+     * registration-order race described above never gets a chance to
+     * happen, regardless of APP_DEBUG. This is the same pattern
+     * Platform\Tenancy\Http\Middleware\TenantAccessGate already uses
+     * successfully for the identical exception type, just applied at
+     * stancl's own documented failure hook instead of a second, wrapping
+     * middleware.
+     *
+     * The response returned matches bootstrap/app.php's own pre-existing
+     * TenantCouldNotBeIdentifiedException render() callback byte-for-byte -
+     * always JSON, regardless of Accept header, since a generic
+     * {"message": "Not Found"} body leaks nothing and needs no view render
+     * (which would otherwise require tenant tables that do not exist for an
+     * unresolved host). That bootstrap/app.php handler is deliberately left
+     * in place as a defense-in-depth fallback for any other code path that
+     * might still reach the exception-handler pipeline directly (e.g. a
+     * console/artisan context) - it simply becomes dead code for the normal
+     * 'web' HTTP path now that this $onFail hook intercepts the exception
+     * before it gets there.
+     */
+    protected function handleUnresolvedTenantDomains(): void
+    {
+        Middleware\InitializeTenancyByDomain::$onFail = function (
+            \Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException $exception,
+            $request
+        ) {
+            return response()->json(['message' => 'Not Found'], 404);
+        };
     }
 }
