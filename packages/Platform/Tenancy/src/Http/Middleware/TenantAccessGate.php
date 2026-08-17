@@ -8,6 +8,7 @@ use Closure;
 use Illuminate\Http\Request;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Services\TenantHostResolver;
+use Platform\Tenancy\Services\TenantUnavailableResponder;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -82,15 +83,26 @@ use Symfony\Component\HttpFoundation\Response;
  * `TenantHostResolver::isReady()` is the ONLY place either call site
  * checks tenant status against `TenantStatus::Ready`, specifically so
  * this middleware and that listener can never independently drift into
- * two different Ready/Suspended/etc. eligibility matrices. This
- * middleware still owns 100% of the actual RESPONSE selection (423 vs
- * 503 vs pass-through, below) - that part is deliberately NOT in the
- * shared service, since the early listener never produces a response at
- * all (it only ever needs a yes/no "safe to touch this tenant's
- * database"). Early tenancy pre-initialization for a Ready tenant does
- * not change anything about this middleware's own re-resolution or
- * response logic below - it still runs, unconditionally, in the same
- * order, for every request.
+ * two different Ready/Suspended/etc. eligibility matrices.
+ *
+ * WHY RESPONSE SELECTION IS NOW ALSO EXTRACTED, INTO `TenantUnavailable
+ * Responder` (RISK_REGISTER.md R58): that same early `RouteMatched`
+ * listener discovered it ALSO needs to produce a real 423/503 response of
+ * its own - for a non-Ready tenant on a route whose controller crashes
+ * during Laravel's eager middleware-discovery step, this middleware never
+ * gets the chance to run at all (see `Platform\Tenancy\Exceptions\
+ * TenantNotReadyHttpException`'s own docblock for the full mechanism). The
+ * actual 423/503/JSON-vs-Blade decision now lives in exactly one place,
+ * `TenantUnavailableResponder::respondTo()`, used by both this middleware
+ * and that exception - not duplicated a second time. This middleware
+ * itself is UNCHANGED in every observable way: same statuses, same status
+ * codes, same bodies, same fail-closed default - only the response-BUILDING
+ * code moved, not the policy. Early tenancy pre-initialization for a Ready
+ * tenant does not change anything about this middleware's own
+ * re-resolution or response logic below - it still runs, unconditionally,
+ * in the same order, for every request; the ONLY behavioral change from
+ * R58 is that a non-Ready tenant on an eager-crashing route now gets
+ * rejected even earlier than this middleware, with an identical response.
  *
  * FAIL CLOSED: the `handle()` `match` below has exactly two explicit
  * "allow through" / "known controlled response" arms - `Ready` and
@@ -109,67 +121,20 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class TenantAccessGate
 {
-    public function __construct(protected TenantHostResolver $hostResolver)
-    {
+    public function __construct(
+        protected TenantHostResolver $hostResolver,
+        protected TenantUnavailableResponder $responder,
+    ) {
     }
 
     public function handle(Request $request, Closure $next): Response
     {
         $tenant = $this->hostResolver->resolve($request->getHost());
 
-        if (! $tenant) {
+        if (! $tenant || $tenant->status === TenantStatus::Ready) {
             return $next($request);
         }
 
-        return match ($tenant->status) {
-            TenantStatus::Ready => $next($request),
-            TenantStatus::Suspended => $this->suspendedResponse($request),
-            default => $this->unavailableResponse($request),
-        };
-    }
-
-    /**
-     * 423 Locked: unchanged since TASK-ARCH-013 - this is not an
-     * authentication/authorization failure (403), not "does not exist"
-     * (404 - the tenant is real, just locked), and not "temporarily down
-     * for infrastructure reasons" (503 - this is an explicit,
-     * administrative, reversible platform action, not an outage). See
-     * docs/architecture/security.md for the full reasoning record.
-     */
-    protected function suspendedResponse(Request $request): Response
-    {
-        if ($request->wantsJson()) {
-            return response()->json([
-                'message' => 'This store is currently unavailable.',
-            ], 423);
-        }
-
-        return response()->view('tenancy::suspended', [], 423);
-    }
-
-    /**
-     * 503 Service Unavailable, not 423: TASK-ARCH-014 covers Pending,
-     * Provisioning, Failed, Deleting, Deleted (and, by the fail-closed
-     * `default` arm above, any unrecognized status too). None of these
-     * are an administrative lock on an otherwise-working store - they are
-     * "not yet available" (Pending/Provisioning), "not currently in a
-     * working state" (Failed), or "on the way out" (Deleting/Deleted).
-     * 503 is the standard HTTP semantic for exactly this: a resource that
-     * is real but not currently servable for infrastructure/lifecycle
-     * reasons, distinct from 423's "administratively locked" meaning
-     * (DECISION_LOG.md C28, RISK_REGISTER.md R41). The response body is
-     * deliberately generic - it must never mention provisioning state,
-     * migration/seed progress, exception messages, or the tenant's
-     * database name (TASK-ARCH-014 requirement 14).
-     */
-    protected function unavailableResponse(Request $request): Response
-    {
-        if ($request->wantsJson()) {
-            return response()->json([
-                'message' => 'This store is currently unavailable.',
-            ], 503);
-        }
-
-        return response()->view('tenancy::unavailable', [], 503);
+        return $this->responder->respondTo($tenant, $request);
     }
 }

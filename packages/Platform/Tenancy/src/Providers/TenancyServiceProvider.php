@@ -435,45 +435,57 @@ class TenancyServiceProvider extends ServiceProvider
      * correct tenant database instead of central.
      *
      * CRITICAL SAFETY REQUIREMENT (TASK-ARCH-013/014's own invariant - a
-     * non-ready tenant's database must never be touched before
-     * `TenantAccessGate` rejects the request centrally): this listener
-     * uses `Platform\Tenancy\Services\TenantHostResolver::isReady()` - the
-     * SAME shared resolver `TenantAccessGate` itself uses for its own
-     * status decision - and ONLY calls `tenancy()->initialize()` when the
-     * resolved tenant is `TenantStatus::Ready`. A Suspended/Pending/
-     * Provisioning/Failed/Deleting/Deleted tenant is deliberately left
-     * uninitialized here; `TenantAccessGate` (which runs moments later, in
-     * the normal 'web' middleware pipeline, using this exact same
-     * resolver) remains the ONLY place that rejects a non-ready tenant,
-     * and still does so before any tenant database access - verified live,
-     * with query-connection instrumentation, for all 6 non-ready statuses
-     * against both a route without the eager-construction issue (storefront
-     * `/`, correctly 503/423, exactly as before) and a route with it
-     * (`/admin/dashboard`, 500 either way - see the important caveat
-     * below). Extracting the resolve+isReady decision into
-     * `TenantHostResolver` (rather than duplicating a second Ready/
-     * Suspended/etc. matrix here) is deliberate - see that class's own
-     * docblock.
+     * non-ready tenant's database must never be touched before its request
+     * is rejected): this listener uses `Platform\Tenancy\Services\
+     * TenantHostResolver::isReady()` - the SAME shared resolver
+     * `TenantAccessGate` itself uses for its own status decision - and
+     * ONLY calls `tenancy()->initialize()` when the resolved tenant is
+     * `TenantStatus::Ready`. A Suspended/Pending/Provisioning/Failed/
+     * Deleting/Deleted tenant is NEVER initialized here (see R58 below for
+     * what happens to it instead - rejected immediately, still without
+     * ever touching its database). `TenantAccessGate` remains a full,
+     * independent, defense-in-depth check in the normal 'web' middleware
+     * pipeline (using this exact same resolver) for any request that
+     * somehow reaches it without having already been rejected here - it is
+     * no longer the ONLY place a non-ready tenant is rejected (see R58),
+     * but produces the identical response if it is ever the one to do so.
+     * Verified live, with query-connection instrumentation, for all 6
+     * non-ready statuses against both a route without the eager-
+     * construction issue (storefront `/`) and a route with it
+     * (`/admin/dashboard`) - zero tenant-connection queries, zero
+     * `tenancy()->initialized`, in every case, both before and after R58's
+     * fix. Extracting the resolve+isReady decision into `TenantHostResolver`
+     * (rather than duplicating a second Ready/Suspended/etc. matrix here)
+     * is deliberate - see that class's own docblock.
      *
-     * IMPORTANT, HONEST CAVEAT (RISK_REGISTER.md R58, a separate, still-
-     * open finding - NOT fixed by this listener, and not something this
-     * listener could fix by itself): a non-ready tenant hitting
-     * `/admin/dashboard` specifically still raw-500s, exactly as it did
-     * BEFORE this fix existed (confirmed by reverting this listener and
-     * re-testing) - because `gatherRouteMiddleware()`'s eager, crashing
-     * construction happens BEFORE ANY middleware, including
-     * `TenantAccessGate`, regardless of whether tenancy gets initialized
-     * early or not; a non-ready tenant is deliberately never initialized
-     * here, so the SAME central-connection `channels` crash that affects
-     * a Ready tenant's first visit ALSO affects a non-ready tenant's visit
-     * to this one specific route family - it was never reachable at all
-     * from `TenantAccessGate`'s own 423/503 response before Laravel's
-     * eager probe already threw. The security-critical property (no
-     * tenant database access for a non-ready tenant) is fully preserved;
-     * the UX property ("Suspended always shows the 423 lock page") is not
-     * yet achieved for this specific route family, and requires a
-     * follow-up fix (a shared, RouteMatched-level short-circuit reusing
-     * `TenantAccessGate`'s own response-building - see R58).
+     * R58 - NOW CLOSED (TASK-MVP-003B): a non-ready tenant used to still
+     * raw-500 on `/admin/dashboard`/`/admin/reports` specifically, even
+     * with the fix above, because `gatherRouteMiddleware()`'s eager,
+     * crashing construction happens BEFORE ANY middleware, including
+     * `TenantAccessGate`, and this listener deliberately never initialized
+     * tenancy for a non-ready tenant - so `TenantAccessGate`'s own 423/503
+     * response was simply never reachable in time for that one route
+     * family. Fixed by having THIS SAME listener also reject non-ready
+     * tenants immediately - not by initializing them (that would violate
+     * the exact invariant this listener exists to protect), but by
+     * THROWING `Platform\Tenancy\Exceptions\TenantNotReadyHttpException`
+     * (carrying the resolved, still-uninitialized Tenant) the moment
+     * `TenantHostResolver::isReady()` returns false for a real, resolved
+     * tenant. That exception's own `render()` method - checked by
+     * `Illuminate\Foundation\Exceptions\Handler::render()` structurally
+     * BEFORE any registered callback, immune to the exact registration-
+     * order race RISK_REGISTER.md R59 already proved live for a plain
+     * `$exceptions->render()` registration - produces the identical
+     * 423/503 response `TenantAccessGate` would have, via the SAME shared
+     * `Platform\Tenancy\Services\TenantUnavailableResponder` (see that
+     * exception's own docblock for the full mechanism, including why
+     * throwing - not returning a response - from a `RouteMatched` listener
+     * is the correct approach: `Router::runRoute()` dispatches this event
+     * with `$halt` defaulted to false, so a listener's return value is
+     * silently discarded; only a thrown exception actually reaches
+     * Laravel's exception-rendering pipeline). Central-only ('platform'-
+     * group) routes and unknown domains are unaffected - both paths
+     * `return` before ever reaching this check, exactly as before.
      *
      * `Tenancy::initialize()` has its own built-in idempotency guard
      * (returns immediately, without re-running any bootstrapper, if
@@ -510,21 +522,26 @@ class TenancyServiceProvider extends ServiceProvider
             $hostResolver = app(\Platform\Tenancy\Services\TenantHostResolver::class);
             $tenant = $hostResolver->resolve($event->request->getHost());
 
-            // CRITICAL: only a tenant TenantAccessGate would ALSO let
-            // through gets initialized here. A Suspended/Pending/
-            // Provisioning/Failed/Deleting/Deleted tenant's database is
-            // never touched by this listener - TenantAccessGate (which
-            // runs moments later, in the normal 'web' middleware
-            // pipeline, using this SAME shared TenantHostResolver) is
-            // still the ONLY place that rejects a non-ready tenant, and
-            // still does so before any tenant database access. See this
-            // class's own docblock above `preInitializeTenancyOnRouteMatch`
-            // for why this check cannot be skipped or weakened.
-            if (! $hostResolver->isReady($tenant)) {
+            if (! $tenant) {
+                return; // Unknown domain - unaffected, existing 404 handling proceeds.
+            }
+
+            if ($hostResolver->isReady($tenant)) {
+                tenancy()->initialize($tenant);
+
                 return;
             }
 
-            tenancy()->initialize($tenant);
+            // R58: reject NOW, before gatherRouteMiddleware()'s eager
+            // controller construction ever runs for THIS non-ready
+            // tenant - never initialize it (see this class's own docblock
+            // above `preInitializeTenancyOnRouteMatch` for why this check
+            // cannot be skipped or weakened). TenantNotReadyHttpException's
+            // own render() produces the identical 423/503
+            // TenantAccessGate would have, via the shared
+            // TenantUnavailableResponder - see that exception's own
+            // docblock for the full mechanism.
+            throw new \Platform\Tenancy\Exceptions\TenantNotReadyHttpException($tenant);
         });
     }
 }

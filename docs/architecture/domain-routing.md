@@ -73,6 +73,35 @@ Host
 
 **Response semantics**: `423 Locked` for `Suspended` only (unchanged since TASK-ARCH-013 - see docs/architecture/security.md's "Tenant suspension bypass" row and DECISION_LOG.md C28 for the reasoning); `503 Service Unavailable` for every other non-Ready status (DECISION_LOG.md C30) - HTML for a normal browser request (`tenancy::suspended` / `tenancy::unavailable`, small Platform-owned views - no `packages/Webkul` view touched), structured JSON (`{"message": "This store is currently unavailable."}`) for any request that `wantsJson()` - covering Shop, Admin, and API requests uniformly, since all three run through the identical `web` middleware group. Neither response body ever mentions the tenant's id, database name, provisioning state, or an exception message - both are static, generic text (`tests/Feature/Platform/TenantAccessGateTest.php` test 9 asserts this directly for the JSON body).
 
+## TASK-MVP-004B/TASK-MVP-003B: an earlier layer, added later (R57/R58)
+
+The flow above is still completely accurate for how `TenantAccessGate` itself works - but it is no longer the FIRST thing that runs for every request. `Illuminate\Routing\Router::runRoute()` fires `Illuminate\Routing\Events\RouteMatched` immediately after route matching, strictly BEFORE the 'web' middleware pipeline (including `TenantAccessGate`) ever runs - and Laravel's own `Route::gatherMiddleware()` (part of determining what that pipeline even contains) eagerly, fully container-resolves the matched controller for certain Bagisto controllers (any extending the classic base `Illuminate\Routing\Controller`, which is effectively all of them), running real constructor-injected database queries before `TenantAccessGate` gets a chance to run at all. `Platform\Tenancy\Providers\TenancyServiceProvider` listens to `RouteMatched` directly (`preInitializeTenancyOnRouteMatch()`) to handle this, reusing the SAME `TenantHostResolver`/status decision `TenantAccessGate` uses (never a second, independently-maintained matrix):
+
+```
+RouteMatched (fires before EVERYTHING, including TenantAccessGate)
+  -> not a 'web'-group route -> do nothing, unaffected (Platform Admin, /join, billing webhook)
+  -> host doesn't resolve to any tenant -> do nothing, existing 404 handling proceeds unaffected
+  -> resolves, tenant Ready -> tenancy()->initialize($tenant) NOW (R57, RISK_REGISTER.md)
+       -> the throwaway eager-controller-construction probe (if any) now runs against
+          the CORRECT tenant database instead of central
+       -> InitializeTenancyByDomain still runs normally moments later - a safe,
+          complete no-op (Tenancy::initialize()'s own idempotency guard)
+  -> resolves, tenant NOT Ready -> throw TenantNotReadyHttpException($tenant) NOW (R58)
+       -> NEVER initializes tenancy for this tenant - the exact TASK-ARCH-013/014
+          invariant above is preserved by construction, not convention
+       -> the exception's own render() method produces the identical 423/503
+          TenantAccessGate would have (Platform\Tenancy\Services\
+          TenantUnavailableResponder - the SAME class TenantAccessGate itself now
+          delegates to, so the two paths can never drift into different response bodies)
+       -> TenantAccessGate never even runs for this request - it remains a full,
+          independent defense-in-depth check for anything that reaches it without
+          having already been rejected here
+```
+
+Why THROW rather than return a response from the listener: confirmed by reading `Illuminate\Routing\Router::runRoute()`'s own source that `RouteMatched` is dispatched with Laravel's default `$halt = false`, so `Illuminate\Events\Dispatcher::invokeListeners()` silently discards every listener's return value - only an actual thrown exception reaches Laravel's exception-rendering pipeline from this point. Why a custom exception with its own `render()` method rather than a new `bootstrap/app.php` `$exceptions->render()` registration: confirmed by reading `Illuminate\Foundation\Exceptions\Handler::render()`'s own source that `method_exists($e, 'render')` is checked and honored unconditionally, structurally BEFORE `renderViaCallbacks()` - immune, by construction, to the exact registration-order race RISK_REGISTER.md R59 already proved live for a different exception under real `APP_DEBUG=false`. See RISK_REGISTER.md R57/R58/R59 and DECISION_LOG.md C70/C73 for the full evidentiary record.
+
+**Known, separate, narrower gaps this layer does NOT close** (RISK_REGISTER.md R61/R62, both open, both deliberately out of scope for R58): (1) `Illuminate\Foundation\Http\Kernel::terminate()` unconditionally re-runs the same eager-controller-construction step, completely independently, AFTER the response has already been sent - invisible to the client, but a real internal crash-and-log event for a non-ready tenant on this route family; (2) an unknown domain (not a non-ready tenant - no tenant resolves at all) hitting the same eager-crash route family still raw-crashes, because `InitializeTenancyByDomain::$onFail` (R53's own fix for this exact "unknown domain" scenario) never gets a chance to run either, for the identical timing reason.
+
 ## TASK-ARCH-003: implemented and proven — the actual wiring
 
 The flow diagram above described the intent; this section documents what was actually built and verified with real HTTP requests through real Bagisto routes (`tests/Feature/Platform/TenantDomainRoutingTest.php`, 7 tests, all passing).
