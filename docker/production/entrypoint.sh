@@ -36,4 +36,17 @@ chown -R www-data:www-data "$STORAGE"
 find "$STORAGE" -type d -exec chmod 775 {} +
 find "$STORAGE" -type f -exec chmod 664 {} +
 
+# TASK-MVP-003A: /backups is a separate bind mount (../backups:/backups,
+# docker-compose.production.yml) - same "prepare ownership on every
+# container start" idea as storage/ above, but deliberately MORE
+# restrictive (750, not 775 - no "other" access at all) since this
+# directory holds real customer/order DB dumps, not just already-public
+# tenant asset files. platform:backup:run itself also chmod(0640)s each
+# individual dump/archive file it writes (Platform\Backup\Services\
+# BackupRunner) - this only needs to guarantee the directory ITSELF is
+# writable by www-data and not walkable by anyone outside that group.
+mkdir -p /backups
+chown -R www-data:www-data /backups
+chmod 750 /backups
+
 exec "$@"

@@ -48,6 +48,7 @@ class ProductionReadinessCheck extends Command
             $this->checkRedis(),
             $this->checkStripe(),
             $this->checkMail(),
+            $this->checkBackupHealth(),
         ];
 
         $this->table(['Check', 'Status', 'Detail'], $rows);
@@ -201,6 +202,63 @@ class ProductionReadinessCheck extends Command
         }
 
         return $this->resultPass('Mail (central SMTP fallback)', 'configured');
+    }
+
+    /**
+     * TASK-MVP-003A. Deliberately reads `config('platform-backup.root')`
+     * and the newest finalized backup's `manifest.json` directly (plain
+     * `json_decode`, no dependency on `Platform\Backup`'s own classes) -
+     * same cross-package-config-only pattern `checkStripe()`/`checkMail()`
+     * already use for `Platform\Billing`'s config, avoiding a circular
+     * package dependency (`Platform\Backup` itself depends on
+     * `Platform\Tenancy`'s `Tenant` model; this class must not depend back
+     * on `Platform\Backup`). Only ever WARNs, never FAILs the command's own
+     * exit code - a missing/stale backup is a real operational concern
+     * worth surfacing, but not something that should block an otherwise
+     * legitimate deploy/emergency-fix workflow, matching this command's
+     * own established philosophy (see class docblock).
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkBackupHealth(): array
+    {
+        $dailyRoot = rtrim((string) config('platform-backup.root'), '/').'/daily';
+
+        if (! is_dir($dailyRoot)) {
+            return $this->resultWarn('Backups', 'no backup directory found yet - platform:backup:run has never succeeded here.');
+        }
+
+        $finalized = array_values(array_filter(
+            scandir($dailyRoot) ?: [],
+            fn (string $name): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}_\d{6}$/', $name)
+        ));
+
+        if ($finalized === []) {
+            return $this->resultWarn('Backups', 'no successful backup found yet - platform:backup:run has never succeeded here.');
+        }
+
+        sort($finalized);
+        $newest = $finalized[array_key_last($finalized)];
+
+        $manifestPath = "{$dailyRoot}/{$newest}/manifest.json";
+        $manifest = is_file($manifestPath) ? json_decode((string) file_get_contents($manifestPath), true) : null;
+
+        if (! is_array($manifest) || ($manifest['status'] ?? null) !== 'success') {
+            return $this->resultWarn('Backups', "newest backup [{$newest}] does not have a valid, successful manifest - inspect it manually.");
+        }
+
+        // diffInHours()'s un-absolute-valued result is signed (negative
+        // for a past timestamp, confirmed empirically against this app's
+        // actual configured timezone) and can carry noisy sub-hour
+        // decimals - `true` (absolute) + round() give a clean "how many
+        // whole hours ago" figure fit for a one-line WARN/PASS message.
+        $ageHours = (int) round(now()->diffInHours($manifest['finished_at'] ?? $manifest['started_at'], true));
+
+        if ($ageHours > 48) {
+            return $this->resultWarn('Backups', "newest successful backup is from [{$newest}], {$ageHours}h ago - STALE (expected at most ~24h for a daily schedule). Check the backup schedule/cron.");
+        }
+
+        return $this->resultPass('Backups', "newest successful backup: [{$newest}] ({$ageHours}h ago, {$manifest['tenant_count']} tenant(s)).");
     }
 
     /** @return array{0: string, 1: string, 2: string} */

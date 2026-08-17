@@ -98,19 +98,22 @@ Bagisto's mail transport (`bagisto-dynamic-smtp`, `Webkul\Core\Mail\Transport\Dy
 
 Must survive restart/redeploy: tenant uploads (`storage/tenant{id}/app/public`, `.../app/private`) and generated image-cache files. Does not need to survive: application code (redeployed from source), logs, the `public/storage` symlink (recreated by a deploy step). **A single persistent volume/bind mount covering the app's `storage/` directory is sufficient for a one-server pilot.** The current `docker-compose.yml` (Laravel Sail's local dev stack) has **no volume for `storage/` at all** - a production compose file (TASK-MVP-004B) must add one.
 
-## N. Backup requirements (not implemented in TASK-MVP-004A - see below)
+## N. Backups
 
-Minimum pilot policy:
+**IMPLEMENTED (TASK-MVP-003A).** Central DB, every tenant DB, and every
+tenant's persistent files - daily, via `platform:backup:run`/
+`platform:backup:cleanup` (`packages/Platform/Backup`), scheduled via a root
+crontab entry. Full implementation record, manifest/checksum design,
+security/permissions, restore-verification proof, and the disaster-recovery
+runbook: [docs/implementation/backup-and-recovery.md](../implementation/backup-and-recovery.md).
+`php artisan platform:production:check` includes a `Backups` row reporting
+the newest successful backup's age.
 
-- Central DB: daily dump.
-- All tenant DBs: daily dump (looping the central `tenants` table, same mechanism used during INCIDENT-001 recovery).
-- Tenant storage files: daily filesystem-level backup.
-- Off-server/off-volume destination (never only on the same disk the application runs on - INCIDENT-001's own precedent).
-- Retention: e.g. 7 daily + 4 weekly (a reasonable starting point, not a hard requirement).
-- Encryption at rest at the backup destination (dumps contain real customer/order data).
-- Periodic (e.g. monthly) real restore-verification, not just "backup exists."
-
-**Execution/scheduling of this policy (an actual backup script, a cron/systemd-timer, an off-server destination) is TASK-MVP-004B work** - it depends on the real production topology, which does not exist yet. This document records the policy; it does not implement it.
+**Known limitation, stated plainly there too**: the backup destination
+(`/opt/estore/backups/`) is still on the SAME physical server as the live
+application/database - a real first layer, not true off-server disaster-recovery
+readiness. Copying/syncing it to an off-server destination remains open,
+deliberately out of TASK-MVP-003A's own scope.
 
 ## O. First-production bootstrap sequence
 

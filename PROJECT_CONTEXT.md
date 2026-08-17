@@ -166,8 +166,8 @@ Everything else in the register (R1-R52, minus the above) is RESOLVED/CLOSED wit
 - Onboarding wizard / store branding UI beyond stock Bagisto Admin settings.
 - Advanced RBAC, accounting dashboards, usage metering/analytics.
 - Product-limit race-condition hardening (R38) — no evidence it's needed yet.
-- Tenant data export/backup tooling beyond the manual `mysqldump` process used in INCIDENT-001 recovery — worth doing before scaling past a small pilot, not before it.
 - Octane adoption.
+- Off-server backup sync (S3/another host) — TASK-MVP-003A implemented real daily backups (central DB + every tenant DB + tenant files, restore-proven) but deliberately left the destination on the same physical server; see docs/implementation/backup-and-recovery.md "Known limitations".
 
 # Deferred Post-MVP Work
 

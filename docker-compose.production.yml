@@ -24,6 +24,14 @@ services:
       - .env
     volumes:
       - ../storage:/var/www/html/storage
+      # TASK-MVP-003A: a dedicated mount, deliberately NOT nested under
+      # /var/www/html/storage (INCIDENT-001's own lesson - a backup
+      # destination inside the same mutable tree it protects is not a real
+      # backup) - lands on /opt/estore/backups/ on the host, a sibling of
+      # /opt/estore/app/ and /opt/estore/mysql-data/, matching this file's
+      # own long-standing top-of-file layout comment. BACKUP_ROOT in .env
+      # must match this mount's container-side path (/backups).
+      - ../backups:/backups
     networks:
       - internal
     depends_on:

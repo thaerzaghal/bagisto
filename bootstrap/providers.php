@@ -2,6 +2,7 @@
 
 use App\Providers\AppServiceProvider;
 use Platform\Admin\Providers\PlatformAdminServiceProvider;
+use Platform\Backup\Providers\BackupServiceProvider;
 use Platform\Billing\Providers\BillingServiceProvider;
 use Platform\Enforcement\Providers\EnforcementServiceProvider;
 use Platform\Plans\Providers\PlansServiceProvider;
@@ -64,6 +65,15 @@ return [
      * channel, or config value. See docs/architecture/tenancy.md (R9).
      */
     TenancyServiceProvider::class,
+
+    /**
+     * TASK-MVP-003A: production backup execution (platform:backup:run/
+     * platform:backup:cleanup) - depends only on Platform\Tenancy (the
+     * central Tenant registry, each tenant's own database() credentials),
+     * so registered immediately after it. Registers console commands only
+     * - no routes/middleware/listeners.
+     */
+    BackupServiceProvider::class,
 
     /**
      * TASK-MVP-001: public merchant self-service signup - depends ONLY on

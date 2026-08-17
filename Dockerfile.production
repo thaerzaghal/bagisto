@@ -48,6 +48,12 @@ FROM php:8.3-fpm AS app
 # alone, and nothing in composer.lock's actual platform requirements ever
 # demanded it (unlike bcmath/zip, which real composer install failures
 # during this task's own build DID prove necessary - not guessed).
+#
+# TASK-MVP-003A: default-mysql-client added (the mysqldump BINARY -
+# packages/Platform/Backup's mysqldump/tar-based backup runner, not a new
+# PHP extension) - not previously needed because nothing in this image ran
+# mysqldump before. bash/tar/gzip are already present in this base Debian
+# image (confirmed directly, not assumed) and need no separate install.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libicu-dev \
         libonig-dev \
@@ -58,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgmp-dev \
         libxml2-dev \
         libcurl4-openssl-dev \
+        default-mysql-client \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
         pdo_mysql \
