@@ -157,6 +157,7 @@ class TenancyServiceProvider extends ServiceProvider
         $this->makeTenancyMiddlewareHighestPriority();
         $this->registerCommands();
         $this->handleUnresolvedTenantDomains();
+        $this->preInitializeTenancyOnRouteMatch();
 
         // INCIDENT-001. Must run before any command's handle() executes -
         // every provider's boot() runs before the console Kernel dispatches
@@ -376,5 +377,154 @@ class TenancyServiceProvider extends ServiceProvider
         ) {
             return response()->json(['message' => 'Not Found'], 404);
         };
+    }
+
+    /**
+     * TASK-MVP-004B (RISK_REGISTER.md R57). A real, reproducible production
+     * bug: a Ready tenant Admin's FIRST visit to `/admin/dashboard` (and,
+     * by the same mechanism, `/admin/reports` - see below) raw-500s with
+     * `SQLSTATE[42S02]: Base table or view not found: 1146 Table
+     * 'bagisto_central.channels' doesn't exist`.
+     *
+     * ROOT CAUSE (confirmed by reading Laravel's own routing source, not
+     * assumed, and by a real `DB::listen()` trace during investigation):
+     * `Illuminate\Routing\Router::runRouteWithinStack()` calls
+     * `Route::gatherMiddleware()` to determine a route's EFFECTIVE
+     * middleware list BEFORE the middleware pipeline itself ever runs (this
+     * happens strictly before `TenantAccessGate`/`InitializeTenancyByDomain`,
+     * both 'web'-group middleware) - and `Route::controllerMiddleware()`
+     * (part of that gathering step) must INSTANTIATE the target controller
+     * via the container to read its own declared per-action middleware,
+     * whenever `method_exists($controllerClass, 'getMiddleware')` is true.
+     * That method is inherited, unconditionally, from Laravel's own base
+     * `Illuminate\Routing\Controller` (confirmed by reading its source) -
+     * meaning EVERY Bagisto Admin/Shop controller extending the classic
+     * base controller is eagerly, wastefully instantiated this way for
+     * EVERY request to EVERY such route, regardless of whether it declares
+     * any middleware at all. This throwaway, discarded instance - never
+     * used to actually handle the request - runs its full constructor
+     * dependency chain while the database connection is still central.
+     * For `Webkul\Admin\Http\Controllers\DashboardController` (constructor-
+     * injects `Webkul\Admin\Helpers\Dashboard`, which constructor-injects
+     * `Webkul\Admin\Helpers\Reporting\{Sale,Product,Customer}`) and
+     * `Webkul\Admin\Http\Controllers\Reporting\Controller` (constructor-
+     * injects `Webkul\Admin\Helpers\Reporting`, which constructor-injects
+     * ALL FOUR `Reporting\{Sale,Product,Customer,Cart}` helpers), that
+     * chain reaches `Webkul\Admin\Helpers\Reporting\AbstractReporting`'s
+     * own constructor, which unconditionally calls `Webkul\Core\Core::
+     * getAllChannels()` - a real query against a table that legitimately
+     * only exists per-tenant. This is a GENERAL architectural risk, not a
+     * single-controller quirk (confirmed by finding two independent real
+     * controllers hitting it, both reachable via real Admin navigation) -
+     * structurally unreachable in stock, single-database Bagisto (there is
+     * nothing else for "central" to mean there), and never caught anywhere
+     * in this engagement's history before a real multi-tenant production
+     * signup, because every earlier admin-dashboard visit in this
+     * codebase's tests reused an already-cache-warmed fixture tenant
+     * rather than a genuinely fresh one on a genuinely separate PHP-FPM-
+     * style request (Pest's in-process HTTP testing does not reproduce
+     * this at all - confirmed empirically; a real `php artisan serve`
+     * process was required).
+     *
+     * FIX: initialize tenancy as early as `Illuminate\Routing\Events\
+     * RouteMatched` - fired by `Router::runRoute()`, BEFORE
+     * `runRouteWithinStack()`'s middleware-gathering step ever runs - so
+     * that by the time Laravel's throwaway controller probe executes for a
+     * READY tenant, tenancy (and the real tenant database connection) is
+     * already active, and the discarded probe's queries land on the
+     * correct tenant database instead of central.
+     *
+     * CRITICAL SAFETY REQUIREMENT (TASK-ARCH-013/014's own invariant - a
+     * non-ready tenant's database must never be touched before
+     * `TenantAccessGate` rejects the request centrally): this listener
+     * uses `Platform\Tenancy\Services\TenantHostResolver::isReady()` - the
+     * SAME shared resolver `TenantAccessGate` itself uses for its own
+     * status decision - and ONLY calls `tenancy()->initialize()` when the
+     * resolved tenant is `TenantStatus::Ready`. A Suspended/Pending/
+     * Provisioning/Failed/Deleting/Deleted tenant is deliberately left
+     * uninitialized here; `TenantAccessGate` (which runs moments later, in
+     * the normal 'web' middleware pipeline, using this exact same
+     * resolver) remains the ONLY place that rejects a non-ready tenant,
+     * and still does so before any tenant database access - verified live,
+     * with query-connection instrumentation, for all 6 non-ready statuses
+     * against both a route without the eager-construction issue (storefront
+     * `/`, correctly 503/423, exactly as before) and a route with it
+     * (`/admin/dashboard`, 500 either way - see the important caveat
+     * below). Extracting the resolve+isReady decision into
+     * `TenantHostResolver` (rather than duplicating a second Ready/
+     * Suspended/etc. matrix here) is deliberate - see that class's own
+     * docblock.
+     *
+     * IMPORTANT, HONEST CAVEAT (RISK_REGISTER.md R58, a separate, still-
+     * open finding - NOT fixed by this listener, and not something this
+     * listener could fix by itself): a non-ready tenant hitting
+     * `/admin/dashboard` specifically still raw-500s, exactly as it did
+     * BEFORE this fix existed (confirmed by reverting this listener and
+     * re-testing) - because `gatherRouteMiddleware()`'s eager, crashing
+     * construction happens BEFORE ANY middleware, including
+     * `TenantAccessGate`, regardless of whether tenancy gets initialized
+     * early or not; a non-ready tenant is deliberately never initialized
+     * here, so the SAME central-connection `channels` crash that affects
+     * a Ready tenant's first visit ALSO affects a non-ready tenant's visit
+     * to this one specific route family - it was never reachable at all
+     * from `TenantAccessGate`'s own 423/503 response before Laravel's
+     * eager probe already threw. The security-critical property (no
+     * tenant database access for a non-ready tenant) is fully preserved;
+     * the UX property ("Suspended always shows the 423 lock page") is not
+     * yet achieved for this specific route family, and requires a
+     * follow-up fix (a shared, RouteMatched-level short-circuit reusing
+     * `TenantAccessGate`'s own response-building - see R58).
+     *
+     * `Tenancy::initialize()` has its own built-in idempotency guard
+     * (returns immediately, without re-running any bootstrapper, if
+     * already initialized for the same tenant), so `InitializeTenancyByDomain`
+     * running normally moments later in the real middleware pipeline is a
+     * safe no-op, not a double-initialization - confirmed by reading
+     * `Stancl\Tenancy\Tenancy::initialize()`'s own source, and the 4
+     * active bootstrappers (`DatabaseTenancyBootstrapper`,
+     * `CacheTenancyBootstrapper`, `FilesystemTenancyBootstrapper`,
+     * `QueueTenancyBootstrapper`) each only ever run once per tenant per
+     * request regardless. `Platform\Tenancy\Models\Tenant`/`Domain` (via
+     * stancl's own `CentralConnection` trait, which hardcodes
+     * `getConnectionName()` to always return the central connection name)
+     * are immune to the current default connection being switched to
+     * 'tenant' early, so `TenantAccessGate`'s own re-resolution moments
+     * later is unaffected regardless of what this listener already did.
+     * Scoped to 'web'-group routes only (checked via the route's own
+     * declared middleware) so central-only ('platform'-group) requests -
+     * Platform Admin, `/join`, billing webhooks - never attempt tenant
+     * resolution at all, even with a manipulated Host header pointing at a
+     * real tenant (verified live).
+     */
+    protected function preInitializeTenancyOnRouteMatch(): void
+    {
+        Event::listen(\Illuminate\Routing\Events\RouteMatched::class, function (\Illuminate\Routing\Events\RouteMatched $event) {
+            if (tenancy()->initialized) {
+                return;
+            }
+
+            if (! in_array('web', $event->route->middleware(), true)) {
+                return;
+            }
+
+            $hostResolver = app(\Platform\Tenancy\Services\TenantHostResolver::class);
+            $tenant = $hostResolver->resolve($event->request->getHost());
+
+            // CRITICAL: only a tenant TenantAccessGate would ALSO let
+            // through gets initialized here. A Suspended/Pending/
+            // Provisioning/Failed/Deleting/Deleted tenant's database is
+            // never touched by this listener - TenantAccessGate (which
+            // runs moments later, in the normal 'web' middleware
+            // pipeline, using this SAME shared TenantHostResolver) is
+            // still the ONLY place that rejects a non-ready tenant, and
+            // still does so before any tenant database access. See this
+            // class's own docblock above `preInitializeTenancyOnRouteMatch`
+            // for why this check cannot be skipped or weakened.
+            if (! $hostResolver->isReady($tenant)) {
+                return;
+            }
+
+            tenancy()->initialize($tenant);
+        });
     }
 }

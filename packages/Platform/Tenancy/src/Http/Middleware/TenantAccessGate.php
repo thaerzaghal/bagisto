@@ -7,8 +7,7 @@ namespace Platform\Tenancy\Http\Middleware;
 use Closure;
 use Illuminate\Http\Request;
 use Platform\Tenancy\Enums\TenantStatus;
-use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
-use Stancl\Tenancy\Resolvers\DomainTenantResolver;
+use Platform\Tenancy\Services\TenantHostResolver;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -21,8 +20,9 @@ use Symfony\Component\HttpFoundation\Response;
  * is the actual request flow:
  *
  *   Host
- *     -> DomainTenantResolver::resolveWithoutCache() [THIS middleware -
- *        a CENTRAL-only `tenants`/`domains` query, no tenant DB touched]
+ *     -> TenantHostResolver::resolve() [THIS middleware - a CENTRAL-only
+ *        `tenants`/`domains` query via `DomainTenantResolver::
+ *        resolveWithoutCache()`, no tenant DB touched]
  *     -> tenant.status:
  *          Ready              -> $next($request) -> InitializeTenancyByDomain
  *                                runs NORMALLY (re-resolves the SAME way it
@@ -71,6 +71,27 @@ use Symfony\Component\HttpFoundation\Response;
  * double-initialization or double-bootstrap - only the second (real)
  * resolution ever reaches `Tenancy::initialize()`.
  *
+ * WHY THE RESOLVE STEP IS EXTRACTED INTO `TenantHostResolver`, NOT
+ * INLINED HERE (RISK_REGISTER.md R57): `Platform\Tenancy\Providers\
+ * TenancyServiceProvider` also needs to know, as early as
+ * `Illuminate\Routing\Events\RouteMatched` (before Laravel's own
+ * `Route::controllerMiddleware()` eagerly, wastefully instantiates the
+ * matched controller to inspect its middleware - see that provider's own
+ * docblock for the full root cause), whether a host resolves to a Ready
+ * tenant, so it can safely pre-initialize tenancy only for that tenant.
+ * `TenantHostResolver::isReady()` is the ONLY place either call site
+ * checks tenant status against `TenantStatus::Ready`, specifically so
+ * this middleware and that listener can never independently drift into
+ * two different Ready/Suspended/etc. eligibility matrices. This
+ * middleware still owns 100% of the actual RESPONSE selection (423 vs
+ * 503 vs pass-through, below) - that part is deliberately NOT in the
+ * shared service, since the early listener never produces a response at
+ * all (it only ever needs a yes/no "safe to touch this tenant's
+ * database"). Early tenancy pre-initialization for a Ready tenant does
+ * not change anything about this middleware's own re-resolution or
+ * response logic below - it still runs, unconditionally, in the same
+ * order, for every request.
+ *
  * FAIL CLOSED: the `handle()` `match` below has exactly two explicit
  * "allow through" / "known controlled response" arms - `Ready` and
  * `Suspended` - and a single `default` arm that rejects with 503. Any
@@ -88,15 +109,15 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class TenantAccessGate
 {
-    public function __construct(protected DomainTenantResolver $resolver)
+    public function __construct(protected TenantHostResolver $hostResolver)
     {
     }
 
     public function handle(Request $request, Closure $next): Response
     {
-        try {
-            $tenant = $this->resolver->resolveWithoutCache($request->getHost());
-        } catch (TenantCouldNotBeIdentifiedException) {
+        $tenant = $this->hostResolver->resolve($request->getHost());
+
+        if (! $tenant) {
             return $next($request);
         }
 
