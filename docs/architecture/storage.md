@@ -118,6 +118,21 @@ Nothing in this design is local-filesystem-specific. `config('tenancy.filesystem
 - **Tenant-owned**: everything else found in the audit — see the table above. All of it is isolated automatically by the disk-root remap; none of it required a `packages/Webkul` change.
 - **Temporary/job**: `DataTransfer`'s `imports/{id}/processed/*` (self-cleaning, already disciplined in stock Bagisto), the downloadable-link "external URL" OS-temp-dir copy (low risk, single-request lifecycle).
 
+**A real production defect this classification predicts, and that TASK-MVP-004
+found and fixed (RISK_REGISTER.md R63):** the "Global" build assets above are
+referenced by Bagisto's own Blade views via the plain `asset()` helper - and
+`config/tenancy.php`'s `filesystem.asset_helper_tenancy` (a stancl/tenancy
+package default, left at its shipped `true` value from this project's very
+first multi-tenancy commit) rewrites EVERY `asset()` call during a tenant
+request to point at the tenant-storage asset route instead, regardless of
+whether the thing being referenced is actually tenant-owned. Global build
+assets were never supposed to go through that route at all - this is now set
+to `false`. Nothing above changes: `Storage::url()` calls for genuinely
+tenant-owned content (product images, theme uploads, etc.) never went through
+`asset_helper_tenancy` in the first place - they resolve via the separate,
+deliberately-registered `/storage/{path}` route (see above), which this flag
+does not affect either way.
+
 ## Logs
 
 Verified: `storage/logs` lives under the tenant-suffixed `storage_path()` once `FilesystemTenancyBootstrapper` is active (same mechanism as `framework/*`), and `ensureFilesystemPrepared()` creates it during provisioning. This means **Laravel's default log channel writes tenant-request logs into that tenant's own `storage/logs`**, not a shared central log. This was not a deliberate design goal of this task (no logging redesign was in scope) but is a direct, correct consequence of the chosen mechanism — flagged explicitly per the task's own instruction to verify this rather than assume. Platform-wide *operational* logging (needed regardless of any single tenant) is a separate, deferred observability decision — central application boot/console logs (anything logged before tenancy initializes, or during central-context requests) are unaffected and continue writing to the central `storage/logs`.

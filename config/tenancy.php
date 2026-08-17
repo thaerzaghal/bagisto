@@ -221,8 +221,24 @@ return [
          * packages that use asset() calls inside the tenant app. To avoid such issues, you can
          * disable asset() helper tenancy and explicitly use tenant_asset() calls in places
          * where you want to use tenant-specific assets (product images, avatars, etc).
+         *
+         * TASK-MVP-004 (real production defect, discovered during a real browser test):
+         * Bagisto's own compiled theme assets (packages/Webkul/*'s Vite build output -
+         * admin/shop CSS/JS/images) are referenced via the plain asset() helper - standard,
+         * unmodified Bagisto behavior. With this left at its package default (true), every
+         * asset() call during a tenant request was rewritten to
+         * /tenancy/assets/themes/.../build/assets/... and routed through
+         * Stancl\Tenancy\Controllers\TenantAssetsController, which only serves files from
+         * that tenant's OWN storage_path('app/public/...') - compiled build assets never
+         * live there, so every CSS/JS/image request 404'd, the Admin Vue app never mounted,
+         * and Login/Reset Password became inert. `tenant_asset()` is not called anywhere in
+         * packages/Webkul or packages/Platform, so nothing in this codebase relies on this
+         * feature. Tenant-uploaded media (product images, avatars) is unaffected by this
+         * change - it is already served through the separate, already-isolated
+         * /storage/{path} tenant filesystem route (see docs/architecture/storage.md,
+         * TenantStorageIsolationTest), not through this asset_helper_tenancy mechanism.
          */
-        'asset_helper_tenancy' => true,
+        'asset_helper_tenancy' => false,
     ],
 
     /**
