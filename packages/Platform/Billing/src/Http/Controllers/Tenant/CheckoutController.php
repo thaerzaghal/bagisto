@@ -8,6 +8,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\View\View;
+use Platform\Billing\Exceptions\MissingProviderCredentialsException;
 use Platform\Billing\Models\Payment;
 use Platform\Billing\Models\PlanPrice;
 use Platform\Billing\Services\CheckoutService;
@@ -57,7 +58,29 @@ class CheckoutController extends Controller
         ]);
     }
 
-    public function store(Request $request, CheckoutService $checkoutService): RedirectResponse
+    /**
+     * RISK_REGISTER.md R59. `CheckoutService` is deliberately NOT a typed
+     * method parameter here (unlike before this fix) - Laravel resolves
+     * typed controller-method parameters via `Illuminate\Routing\
+     * ResolvesRouteDependencies` BEFORE this method's own body (and any
+     * try/catch inside it) ever runs, which is exactly why a Stripe-
+     * credential failure previously had to be caught by a GLOBAL
+     * `bootstrap/app.php` exception-render callback instead - and that
+     * callback was proven (RISK_REGISTER.md R53, then confirmed again
+     * live for this exact exception as R59) to silently lose a
+     * registration-order race against `Webkul\Core\Exceptions\Handler`'s
+     * own catch-all `Throwable` renderable under real `APP_DEBUG=false`,
+     * producing a raw, generic 500 instead of this method's intended
+     * graceful redirect. Resolving `CheckoutService` manually, as an
+     * ordinary statement inside this method's own body, means its
+     * `MissingProviderCredentialsException` is an entirely normal PHP
+     * exception at this point - catchable here, with zero dependency on
+     * global exception-handler registration order. `StripePaymentProvider`
+     * itself is unchanged - it still fails loudly at resolution time, as
+     * designed; only WHERE that resolution happens (inside this try,
+     * rather than as an auto-resolved method parameter) changed.
+     */
+    public function store(Request $request): RedirectResponse
     {
         $validated = $request->validate([
             'plan_price_id' => ['required', 'integer'],
@@ -71,13 +94,19 @@ class CheckoutController extends Controller
 
         abort_unless($subscription, 404, 'This tenant has no subscription to check out against.');
 
-        $result = $checkoutService->initiate(
-            tenant(),
-            $subscription,
-            $planPrice,
-            route('admin.saas.checkout.success'),
-            route('admin.saas.checkout.cancel')
-        );
+        try {
+            $result = app(CheckoutService::class)->initiate(
+                tenant(),
+                $subscription,
+                $planPrice,
+                route('admin.saas.checkout.success'),
+                route('admin.saas.checkout.cancel')
+            );
+        } catch (MissingProviderCredentialsException) {
+            return redirect()
+                ->route('admin.saas.checkout.index')
+                ->with('error', 'Online subscription billing is not available yet. Please contact the platform administrator to change your plan.');
+        }
 
         return redirect()->away($result['redirectUrl']);
     }

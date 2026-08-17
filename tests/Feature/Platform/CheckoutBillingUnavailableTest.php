@@ -2,26 +2,45 @@
 
 /**
  * TASK-MVP-004A (task section 3) - "Stripe-unavailable pilot UX".
+ * RISK_REGISTER.md R59 (TASK-MVP-004B) - this file's own tests, as
+ * originally written, passed cleanly for months while NEVER actually
+ * exercising the real production condition: nothing in this file (nor
+ * phpunit.xml/.env.testing) ever pinned `APP_DEBUG`, so every test here
+ * silently inherited the ambient local/CI default (`true`) - under which
+ * `Webkul\Core\Exceptions\Handler::register()` early-returns and registers
+ * NOTHING, meaning `bootstrap/app.php`'s per-exception-type `$exceptions->
+ * render()` registration always won by default, whether or not it could
+ * ACTUALLY win a real registration-order race. The real pilot server runs
+ * `APP_DEBUG=false`, under which that registration was proven (live, via a
+ * real merchant checkout attempt) to silently lose the exact same
+ * registration-order race RISK_REGISTER.md R53 already found and fixed for
+ * a DIFFERENT exception (`TenantCouldNotBeIdentifiedException`) - producing
+ * a raw, generic 500 instead of the graceful redirect this file's tests
+ * believed they were proving. Every test below now explicitly forces
+ * `config(['app.debug' => false])` (see beforeEach()), the exact same
+ * technique already proven live to reproduce this class of bug in
+ * `ProductionHostErrorHandlingTest.php` (R53) - the exception Handler is
+ * constructed FRESHLY per-request/per-exception, so a runtime `config()`
+ * override made before the simulated request dispatches is correctly seen
+ * by `Webkul\Core\Exceptions\Handler::register()`'s own construction-time
+ * logic; no real subprocess is needed the way R57's Router-ordering bug
+ * needed one.
  *
- * Reproduces the exact real-world pilot posture: STRIPE_SECRET left blank
- * (today's actual .env.example default, and the recommended pilot posture -
- * see TASK-MVP-004's own investigation report, section 15). Proves a
- * merchant who clicks "Upgrade Plan" in this state gets a clean, safe
- * redirect with a flash message - never a raw, unhandled exception/stack
- * trace - and that nothing financial or subscription-related is mutated.
- *
- * KEY FINDING this test proves structurally (not just behaviorally):
- * `Platform\Billing\Http\Controllers\Tenant\CheckoutController::store()`
- * method-injects `Platform\Billing\Services\CheckoutService`, which itself
- * constructor-injects the `PaymentProvider` contract - so
- * `MissingProviderCredentialsException` (thrown by
- * `Platform\Billing\Adapters\StripePaymentProvider`'s own constructor) is
- * raised during Laravel's OWN controller-method dependency resolution,
- * BEFORE `store()`'s method body ever runs. A try/catch placed inside that
- * method body would never see it - only the global `bootstrap/app.php`
- * `withExceptions()` render() handler (see that file) actually can. If a
- * future change moved the exception handling back into the controller
- * body, this whole file would start failing.
+ * THE FIX (R59): `Platform\Billing\Http\Controllers\Tenant\
+ * CheckoutController::store()` no longer method-injects `Platform\Billing\
+ * Services\CheckoutService` as a typed parameter (the ORIGINAL R52 design,
+ * which this file's OLD test 6 used to assert as correct) - Laravel
+ * resolves typed method parameters BEFORE the method body runs, which is
+ * exactly why the old design needed a GLOBAL exception-render callback in
+ * the first place, and exactly why that callback's registration-order
+ * fragility mattered. `CheckoutService` is now resolved manually, as an
+ * ordinary statement inside `store()`'s own body, wrapped in a try/catch
+ * scoped to ONLY `MissingProviderCredentialsException` - an entirely
+ * normal, LOCALLY-catchable PHP exception at that point, with zero
+ * dependency on global exception-handler registration order. The
+ * now-dead, now-removed `bootstrap/app.php` render() registration for this
+ * exception is confirmed (full-codebase audit, see that file's own
+ * updated docblock) to have had no other real caller.
  *
  * Real MySQL, real HTTP requests through the actual registered tenant-admin
  * checkout route - nothing mocked. Dedicated `tenant-checkout-unavailable`
@@ -88,6 +107,16 @@ function ensureUnavailableCheckoutPrice(Plan $plan): PlanPrice
         'is_active' => true,
     ]);
 }
+
+beforeEach(function () {
+    // R59 - see file docblock. Forces the exact real production condition
+    // (`Webkul\Core\Exceptions\Handler::register()` registering its
+    // catch-all `Throwable` renderable) every test in this file needs in
+    // order to actually prove anything about registration-order safety,
+    // rather than silently inheriting the ambient local/CI APP_DEBUG=true
+    // default under which Bagisto's catch-all never registers at all.
+    config(['app.debug' => false]);
+});
 
 test('1. clicking Upgrade Plan with STRIPE_SECRET blank redirects cleanly instead of a raw unhandled exception', function () {
     config(['platform-billing.stripe.secret' => '']);
@@ -181,21 +210,63 @@ test('5. no Payment row is created for a failed (missing-credentials) checkout a
     expect(Payment::where('tenant_id', UNAVAILABLE_TENANT_ID)->count())->toBe($countBefore);
 });
 
-test('6. MissingProviderCredentialsException is genuinely thrown during controller-method dependency resolution, not inside the method body', function () {
-    // Structural proof of the finding this whole file exists to guard
-    // against: CheckoutService is a METHOD parameter of store(), and its
-    // own constructor requires the PaymentProvider contract - so
-    // reflection on the controller's method signature (not the class
-    // constructor) is where the resolvable-but-failing dependency lives.
+test('6. CheckoutService is deliberately NOT an auto-resolved method parameter of store() (R59 structural proof)', function () {
+    // The OLD (R52-era, now-broken-under-APP_DEBUG=false) design had
+    // CheckoutService as a typed METHOD parameter of store() specifically
+    // so Laravel's own dependency resolution would raise
+    // MissingProviderCredentialsException BEFORE the method body ran -
+    // which is exactly why it could only ever be caught by a global,
+    // registration-order-fragile bootstrap/app.php render() callback. R59
+    // deliberately moved resolution inside the method body instead, so it
+    // is an ordinary, locally-catchable statement. If a future change
+    // reintroduced CheckoutService as a typed method parameter, this
+    // assertion would fail immediately, flagging that the R59 fix (and
+    // this file's own APP_DEBUG=false tests) would silently stop proving
+    // what they claim to prove.
     $reflection = new ReflectionMethod(\Platform\Billing\Http\Controllers\Tenant\CheckoutController::class, 'store');
     $paramTypes = array_map(fn ($p) => (string) $p->getType(), $reflection->getParameters());
 
-    expect($paramTypes)->toContain(\Platform\Billing\Services\CheckoutService::class);
+    expect($paramTypes)->not->toContain(\Platform\Billing\Services\CheckoutService::class);
 
     config(['platform-billing.stripe.secret' => '']);
 
     expect(fn () => app(\Platform\Billing\Services\CheckoutService::class))
         ->toThrow(MissingProviderCredentialsException::class);
+});
+
+test('8. an unrelated exception (inactive plan) is NOT converted into the billing-unavailable message - R59 catch is scoped only to MissingProviderCredentialsException', function () {
+    // A real, configured Stripe provider (credentials present, so
+    // MissingProviderCredentialsException cannot fire at all here) - the
+    // ONLY thing wrong with this attempt is an inactive Plan, an entirely
+    // different, unrelated failure CheckoutService::initiate() itself
+    // throws (InactivePlanException). Proves R59's try/catch in
+    // CheckoutController::store() is narrowly scoped, not a broad
+    // catch-and-redirect-everything.
+    config(['platform-billing.stripe.secret' => 'sk_test_fake_for_this_test_suite']);
+
+    $tenant = ensureUnavailableCheckoutTenant();
+    $plan = Plan::updateOrCreate(
+        ['code' => 'checkout-plan-inactive-for-r59'],
+        ['name' => 'Inactive Plan For R59', 'is_active' => false, 'sort_order' => 201]
+    );
+    $price = ensureUnavailableCheckoutPrice($plan);
+
+    unavailableCheckoutLoginAsTenantAdmin($this);
+
+    $response = $this->post('http://'.UNAVAILABLE_TENANT_ID.'.localhost/admin/saas/plan/checkout', [
+        'plan_price_id' => $price->id,
+    ]);
+
+    // Must NOT be R59's own graceful billing-unavailable redirect/message -
+    // an unrelated failure must follow Bagisto's normal (if generic, under
+    // APP_DEBUG=false) exception handling instead. session('error') (not
+    // $response->getSession(), which only exists on a RedirectResponse -
+    // an uncaught exception's response here is a plain error-page Response)
+    // still correctly reflects whatever this request's session ended up
+    // holding.
+    expect(session('error'))
+        ->not->toBe('Online subscription billing is not available yet. Please contact the platform administrator to change your plan.');
+    expect($response->status())->not->toBe(302);
 });
 
 test('7. configured-provider (real STRIPE_SECRET present) checkout behavior is unaffected', function () {
