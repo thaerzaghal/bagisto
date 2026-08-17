@@ -217,6 +217,98 @@ test('a failure during provisioning marks the tenant FAILED with a recorded erro
     expect($tenant->database()->manager()->databaseExists($tenant->database()->getName()))->toBeFalse();
 });
 
+test('R56: provisioning succeeds through a narrowly-scoped, non-root tenant_provisioning connection - regression for the real production access-denied bug', function () {
+    // TASK-MVP-004B (RISK_REGISTER.md R56). Every OTHER test in this file
+    // (and every environment this whole engagement ever tested provisioning
+    // in) uses DB_PROVISION_USERNAME=root for tenant_provisioning, which has
+    // universal MySQL access - structurally unable to ever surface the real
+    // bug found live on the pilot server's first-ever real signup:
+    // `estore_provisioner` (correctly scoped per docs/architecture/
+    // provisioning.md - CREATE/DROP on `tenant%` only, zero grant on the
+    // central database) failed immediately with SQLSTATE[HY000] [1044]
+    // "Access denied ... to database 'bagisto_central'" the moment ANY
+    // query ran on that connection - because config/database.php used to
+    // set tenant_provisioning's own `database` to the CENTRAL database
+    // name, a value `Stancl\Tenancy\TenantDatabaseManagers\
+    // MySQLDatabaseManager::databaseExists()`/`createDatabase()`/
+    // `deleteDatabase()` never actually need (all fully-qualified,
+    // confirmed by reading that class's own source), but which MySQL's
+    // own access-control check still evaluates at connect/session-context
+    // time regardless of what the query itself targets.
+    //
+    // This test creates a REAL MySQL user with the exact production grant
+    // shape (mirroring docker/production/mysql-init/
+    // 01-create-app-users.sql.example's estore_provisioner grants -
+    // CREATE/DROP on `tenant%` + CREATE USER globally, nothing on the
+    // central database), points tenant_provisioning at it for the
+    // duration of this test only, and proves real end-to-end provisioning
+    // succeeds through it - closing the exact masking gap that let this
+    // reach a real pilot deployment before being caught.
+    $root = DB::connection('tenant_provisioning');
+    $testProvisionUser = 'test_prov_scoped_'.substr(md5((string) microtime(true)), 0, 8);
+    $testProvisionPassword = 'test-scoped-password-1';
+
+    $root->statement("CREATE USER '{$testProvisionUser}'@'%' IDENTIFIED BY '{$testProvisionPassword}'");
+    $root->statement("GRANT CREATE, DROP ON `tenant%`.* TO '{$testProvisionUser}'@'%'");
+    $root->statement("GRANT CREATE USER ON *.* TO '{$testProvisionUser}'@'%'");
+    $root->statement("GRANT ALTER, ALTER ROUTINE, CREATE, CREATE ROUTINE, CREATE TEMPORARY TABLES,
+        CREATE VIEW, DELETE, DROP, EVENT, EXECUTE, INDEX, INSERT, LOCK TABLES,
+        REFERENCES, SELECT, SHOW VIEW, TRIGGER, UPDATE
+        ON `tenant%`.* TO '{$testProvisionUser}'@'%' WITH GRANT OPTION");
+    $root->statement('FLUSH PRIVILEGES');
+
+    $originalConfig = config('database.connections.tenant_provisioning');
+
+    // Deliberately does NOT override 'database' here - this must exercise
+    // whatever config/database.php's own real, current value is (the thing
+    // under test), not a value this test hardcodes. Only username/password
+    // are swapped to the scoped test user.
+    config(['database.connections.tenant_provisioning' => array_merge($originalConfig, [
+        'username' => $testProvisionUser,
+        'password' => $testProvisionPassword,
+    ])]);
+    DB::purge('tenant_provisioning');
+
+    try {
+        $tenant = Tenant::create(['id' => 'tenant-prov-scoped', 'status' => TenantStatus::Pending]);
+        $tenant->domains()->create(['domain' => 'tenant-prov-scoped.spike.test']);
+
+        app(TenantProvisioner::class)->provision($tenant);
+        $tenant->refresh();
+
+        expect($tenant->status)->toBe(TenantStatus::Ready);
+        expect($tenant->last_error)->toBeNull();
+    } finally {
+        // Restore the real (root, in this test env) connection BEFORE
+        // cleanup - dropping the tenant database/user needs elevated
+        // privileges the scoped test user doesn't have for anything
+        // outside `tenant%`/its own CREATE USER grant reach.
+        config(['database.connections.tenant_provisioning' => $originalConfig]);
+        DB::purge('tenant_provisioning');
+
+        $central = DB::connection('mysql');
+        $provisioning = DB::connection('tenant_provisioning');
+        $row = $central->table('tenants')->where('id', 'tenant-prov-scoped')->first();
+
+        if ($row) {
+            $data = json_decode($row->data ?? '{}', true) ?: [];
+
+            if (! empty($data['tenancy_db_username'])) {
+                $provisioning->statement('DROP USER IF EXISTS `'.str_replace('`', '``', $data['tenancy_db_username']).'`');
+            }
+
+            if (! empty($data['tenancy_db_name'])) {
+                $provisioning->statement('DROP DATABASE IF EXISTS `'.str_replace('`', '``', $data['tenancy_db_name']).'`');
+            }
+        }
+
+        $central->table('domains')->where('tenant_id', 'tenant-prov-scoped')->delete();
+        $central->table('tenants')->where('id', 'tenant-prov-scoped')->delete();
+
+        $provisioning->statement("DROP USER IF EXISTS '{$testProvisionUser}'@'%'");
+    }
+});
+
 test('provisioning is idempotent: re-running it on an already-READY tenant, or resuming from PENDING again, never duplicates data', function () {
     $provisioner = app(TenantProvisioner::class);
 

@@ -85,6 +85,39 @@ return [
         | MUST set DB_PROVISION_USERNAME/DB_PROVISION_PASSWORD to a distinct,
         | narrowly-granted user - see docs/architecture/provisioning.md.
         |
+        | TASK-MVP-004B (RISK_REGISTER.md R56): `database` deliberately left
+        | empty here, NOT `env('DB_DATABASE')` (the central database name).
+        | Found live on the real pilot server, during the first-ever
+        | production signup: the real `estore_provisioner` user (correctly
+        | scoped, per the docblock above - CREATE/DROP on `tenant%` only,
+        | no grant on the central database at all) failed to connect/query
+        | at all with `SQLSTATE[HY000] [1044] Access denied for user
+        | 'estore_provisioner'@'%' to database 'bagisto_central'` - thrown
+        | the moment `Stancl\Tenancy\TenantDatabaseManagers\
+        | MySQLDatabaseManager::databaseExists()` ran its first query on
+        | this connection, even though that query (`SELECT ... FROM
+        | INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?`) targets a
+        | completely different, not-yet-existing tenant database name and
+        | has no dependency whatsoever on this connection's own default
+        | database (confirmed by reading MySQLDatabaseManager's full
+        | source - createDatabase()/deleteDatabase() are equally
+        | fully-qualified, `` `{$database}` ``, never relying on any
+        | ambient default schema). The `database` value only controls
+        | which schema gets selected via `dbname=` in the PDO DSN at
+        | CONNECT time - with it set to `bagisto_central`, MySQL's own
+        | access-control check at connection/session-context time fires
+        | immediately for a user with zero grants there, before any actual
+        | query runs. Never caught before this: every prior environment's
+        | own `DB_PROVISION_USERNAME` was `root` (unset in .env, falling
+        | back to the `mysql` connection's username default) - root has
+        | universal access, so this exact privilege boundary was
+        | structurally unreachable until a real, narrowly-scoped
+        | production provisioning user was used for the first time.
+        | Verified empirically before this fix: a raw PDO connection using
+        | the exact DSN Laravel builds for an empty `database` config
+        | (`mysql:host=...;port=...;dbname=`) connects and runs the
+        | identical failing query successfully as `estore_provisioner`.
+        |
         */
 
         'tenant_provisioning' => [
@@ -92,7 +125,7 @@ return [
             'url' => env('DB_URL'),
             'host' => env('DB_HOST', '127.0.0.1'),
             'port' => env('DB_PORT', '3306'),
-            'database' => env('DB_DATABASE', 'laravel'),
+            'database' => '',
             'username' => env('DB_PROVISION_USERNAME', env('DB_USERNAME', 'root')),
             'password' => env('DB_PROVISION_PASSWORD', env('DB_PASSWORD', '')),
             'unix_socket' => env('DB_SOCKET', ''),
