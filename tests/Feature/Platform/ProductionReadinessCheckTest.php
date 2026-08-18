@@ -167,3 +167,63 @@ test('9. reports the deployed APP_COMMIT marker when present, and warns (not fai
         @unlink($marker);
     }
 });
+
+test('10. warns (does not fail) when Turnstile signup abuse protection is disabled', function () {
+    config([
+        'app.debug' => false,
+        'platform.base_domain' => 'app.example.test',
+        'tenancy.central_domains' => ['app.example.test'],
+        'cache.default' => 'redis',
+        'session.driver' => 'database',
+        'responsecache.enabled' => false,
+        'database.connections.tenant_provisioning.username' => 'provisioning_user',
+        'platform-billing.stripe.secret' => 'sk_test_configured',
+        'mail.mailers.smtp.host' => 'smtp.real-provider.test',
+        'mail.mailers.smtp.port' => '587',
+        'tenancy.filesystem.asset_helper_tenancy' => false,
+        'platform.signup.turnstile.enabled' => false,
+    ]);
+
+    putenv('TRUSTED_PROXIES=10.0.0.5');
+    putenv('PLATFORM_CENTRAL_DOMAINS=app.example.test');
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('Signup abuse protection');
+    expect($output)->toContain('WARN');
+    $this->artisan('platform:production:check')->assertSuccessful();
+
+    putenv('TRUSTED_PROXIES');
+    putenv('PLATFORM_CENTRAL_DOMAINS');
+});
+
+test('11. passes when Turnstile is enabled with both keys configured', function () {
+    config([
+        'platform.signup.turnstile.enabled' => true,
+        'platform.signup.turnstile.site_key' => 'a-real-site-key',
+        'platform.signup.turnstile.secret_key' => 'a-real-secret-key',
+    ]);
+
+    Artisan::call('platform:production:check');
+
+    expect(Artisan::output())->toContain('Signup abuse protection');
+    expect(Artisan::output())->not->toContain('Signup abuse protection</error>');
+});
+
+test('12. fails when Turnstile is enabled but a key is missing, and never prints the secret value', function () {
+    config([
+        'app.debug' => false,
+        'responsecache.enabled' => false,
+        'platform.signup.turnstile.enabled' => true,
+        'platform.signup.turnstile.site_key' => 'a-real-site-key',
+        'platform.signup.turnstile.secret_key' => '',
+    ]);
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('Signup abuse protection');
+    expect($output)->toContain('TURNSTILE_SECRET_KEY');
+    $this->artisan('platform:production:check')->assertFailed();
+});

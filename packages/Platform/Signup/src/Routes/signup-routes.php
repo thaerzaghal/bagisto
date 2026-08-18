@@ -22,13 +22,22 @@ use Platform\Signup\Http\Middleware\EnsureCentralDomain;
  *
  * `signed` on both retry routes is the REQUIRED SECURITY ADJUSTMENT from
  * the approved plan - see SignupRetryController's own docblock.
+ *
+ * TASK-MVP-006. `join`'s own throttle tightened from 6/min to 3/min/IP -
+ * `Platform\Signup\Services\TurnstileVerifier` (called from
+ * `SignupController::store()`, before any provisioning side effect) is
+ * now the PRIMARY anonymous-abuse defense; this throttle is a backstop
+ * against a single client hammering the endpoint, not the main control.
+ * `join/retry/*`'s own throttle is deliberately UNCHANGED and does NOT
+ * go through Turnstile - authorization there is already a cryptographic
+ * signed URL (never anonymous), a materially different risk profile.
  */
 Route::middleware([EnsureCentralDomain::class, 'platform'])
     ->group(function () {
         Route::get('join', [SignupController::class, 'create'])->name('signup.create');
 
         Route::post('join', [SignupController::class, 'store'])
-            ->middleware('throttle:6,1')
+            ->middleware('throttle:3,1')
             ->name('signup.store');
 
         Route::get('join/retry/{tenant}', [SignupRetryController::class, 'show'])

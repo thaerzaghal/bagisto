@@ -21,7 +21,19 @@
             <label for="password_confirmation">Confirm password</label>
             <input id="password_confirmation" type="password" name="password_confirmation" required minlength="8">
 
+            @if (config('platform.signup.turnstile.enabled'))
+                {{-- TASK-MVP-006. Site key only - never the secret. Cloudflare's
+                     own implicit-render widget; the server-side check in
+                     SignupController::store() is the real security boundary,
+                     not this widget's presence/absence on its own. --}}
+                <div class="cf-turnstile" data-sitekey="{{ config('platform.signup.turnstile.site_key') }}"></div>
+            @endif
+
             <button type="submit">Create my store</button>
         </form>
     </div>
+
+    @if (config('platform.signup.turnstile.enabled'))
+        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    @endif
 @endsection

@@ -7,9 +7,11 @@ namespace Platform\Signup\Http\Controllers;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Platform\Signup\Http\SignupResultResponder;
 use Platform\Signup\Services\MerchantOnboarding;
+use Platform\Signup\Services\TurnstileVerifier;
 use Platform\Tenancy\Models\Tenant;
 use Stancl\Tenancy\Database\Models\Domain;
 
@@ -29,6 +31,15 @@ use Stancl\Tenancy\Database\Models\Domain;
  * which is safe regardless of ambient connection state - the same fix
  * R42 already established, applied here from the start rather than
  * discovered the hard way a second time.
+ *
+ * TASK-MVP-006. `TurnstileVerifier::verify()` runs AFTER cheap local
+ * validation but BEFORE `MerchantOnboarding::register()` - every real
+ * side effect of a signup (Tenant/Domain rows, a physical MySQL
+ * database, a full schema migration, a Subscription, an Admin) is
+ * expensive, so nothing past this point ever runs for a request that
+ * fails the challenge. A failure is reported via the exact same
+ * `ValidationException`/`$errors` mechanism the field-level checks
+ * above already use - no new response shape, no new view.
  */
 class SignupController
 {
@@ -37,9 +48,15 @@ class SignupController
         return view('signup::create');
     }
 
-    public function store(Request $request, MerchantOnboarding $onboarding, SignupResultResponder $responder): View|RedirectResponse
+    public function store(Request $request, MerchantOnboarding $onboarding, TurnstileVerifier $turnstile, SignupResultResponder $responder): View|RedirectResponse
     {
         $validated = $this->validated($request);
+
+        if (! $turnstile->verify($request->input('cf-turnstile-response'), $request->ip())) {
+            throw ValidationException::withMessages([
+                'turnstile' => 'We could not verify you are human. Please try again.',
+            ]);
+        }
 
         $domain = $validated['slug'].'.'.config('platform.base_domain');
 

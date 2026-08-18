@@ -56,6 +56,25 @@ return [
             'central',
         ],
 
+        /**
+         * TASK-MVP-006. Server-side gate `Platform\Signup\Services\
+         * TurnstileVerifier` reads - see that class's own docblock for the
+         * full fail-closed-when-enabled contract. `enabled => false` (the
+         * default) is the deliberate posture for local dev, automated
+         * tests, and an invited-only pilot where public signup abuse is
+         * not yet a realistic threat - `php artisan platform:production:check`
+         * WARNs (never fails) when disabled, since that is a legitimate
+         * choice, not a misconfiguration, until signup is actually opened
+         * publicly. `site_key` is safe to render into the signup page's
+         * HTML/JS; `secret_key` is server-only and must never reach a
+         * response body.
+         */
+        'turnstile' => [
+            'enabled' => (bool) env('TURNSTILE_ENABLED', false),
+            'site_key' => env('TURNSTILE_SITE_KEY', ''),
+            'secret_key' => env('TURNSTILE_SECRET_KEY', ''),
+        ],
+
     ],
 
 ];

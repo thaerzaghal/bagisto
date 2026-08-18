@@ -47,6 +47,7 @@ class ProductionReadinessCheck extends Command
             $this->checkProvisioningCredentials(),
             $this->checkAssetHelperTenancy(),
             $this->checkDeployedSource(),
+            $this->checkSignupAbuseProtection(),
             $this->checkRedis(),
             $this->checkStripe(),
             $this->checkMail(),
@@ -218,6 +219,40 @@ class ProductionReadinessCheck extends Command
         $commit = trim((string) file_get_contents($marker));
 
         return $this->resultPass('Deployed source', $commit !== '' ? $commit : '(APP_COMMIT file is empty)');
+    }
+
+    /**
+     * TASK-MVP-006. Deliberately a LOCAL config-only check - never calls
+     * Cloudflare (matching this command's existing "no expensive provider
+     * calls on every execution" posture, e.g. `checkOffsiteBackupHealth()`).
+     * `Platform\Signup\Services\TurnstileVerifier` is the real enforcement
+     * point; this row only reports whether it is actually armed.
+     *
+     * Disabled is a WARN, not a FAIL - a legitimate posture for an
+     * invited-only pilot (this command's own established philosophy: never
+     * fail the exit code merely to be dramatic about a deliberate choice).
+     * Enabled-but-misconfigured (a missing site/secret key) is a FAIL, not
+     * a WARN - unlike "disabled", there is no legitimate reason to be in
+     * that state; public signup would fail unpredictably for every real
+     * merchant the moment `TurnstileVerifier` tries to verify against an
+     * empty secret.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkSignupAbuseProtection(): array
+    {
+        if (! config('platform.signup.turnstile.enabled')) {
+            return $this->resultWarn('Signup abuse protection', 'Turnstile disabled - acceptable for an invited-only pilot; required before opening public self-service signup.');
+        }
+
+        $siteKey = (string) config('platform.signup.turnstile.site_key');
+        $secretKey = (string) config('platform.signup.turnstile.secret_key');
+
+        if ($siteKey === '' || $secretKey === '') {
+            return $this->resultFail('Signup abuse protection', 'Turnstile is ENABLED but '.($siteKey === '' ? 'TURNSTILE_SITE_KEY' : 'TURNSTILE_SECRET_KEY').' is missing - public signup will fail for every real merchant.');
+        }
+
+        return $this->resultPass('Signup abuse protection', 'Turnstile enabled, site key and secret key configured.');
     }
 
     /** @return array{0: string, 1: string, 2: string} */
