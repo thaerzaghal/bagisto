@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace Platform\Tenancy\Providers;
 
 use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Database\Events\MigrationStarted;
 use Illuminate\Queue\Events\JobReleasedAfterException;
+use Illuminate\Routing\Events\RouteMatched;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
@@ -17,6 +20,8 @@ use Platform\Tenancy\Console\Commands\ProductionReadinessCheck;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Console\Commands\RepairChannelHostname;
+use Platform\Tenancy\Exceptions\CentralSafeExceptionHandler;
+use Platform\Tenancy\Exceptions\TenantNotReadyHttpException;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
 use Platform\Tenancy\Listeners\EndTenancyAfterJobRelease;
 use Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema;
@@ -24,6 +29,8 @@ use Platform\Tenancy\Listeners\RejectBagistoInstallAgainstProtectedDatabase;
 use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Platform\Tenancy\Services\CentralDatabaseWipeGuard;
+use Platform\Tenancy\Services\TenantHostResolver;
+use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
 use Stancl\Tenancy\Middleware;
@@ -158,6 +165,7 @@ class TenancyServiceProvider extends ServiceProvider
         $this->registerCommands();
         $this->handleUnresolvedTenantDomains();
         $this->preInitializeTenancyOnRouteMatch();
+        $this->installCentralSafeExceptionHandler();
 
         // INCIDENT-001. Must run before any command's handle() executes -
         // every provider's boot() runs before the console Kernel dispatches
@@ -305,7 +313,7 @@ class TenancyServiceProvider extends ServiceProvider
         ];
 
         foreach (array_reverse($tenancyMiddleware) as $middleware) {
-            $this->app[\Illuminate\Contracts\Http\Kernel::class]->prependToMiddlewarePriority($middleware);
+            $this->app[Kernel::class]->prependToMiddlewarePriority($middleware);
         }
     }
 
@@ -372,7 +380,7 @@ class TenancyServiceProvider extends ServiceProvider
     protected function handleUnresolvedTenantDomains(): void
     {
         Middleware\InitializeTenancyByDomain::$onFail = function (
-            \Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException $exception,
+            TenantCouldNotBeIdentifiedException $exception,
             $request
         ) {
             return response()->json(['message' => 'Not Found'], 404);
@@ -510,7 +518,7 @@ class TenancyServiceProvider extends ServiceProvider
      */
     protected function preInitializeTenancyOnRouteMatch(): void
     {
-        Event::listen(\Illuminate\Routing\Events\RouteMatched::class, function (\Illuminate\Routing\Events\RouteMatched $event) {
+        Event::listen(RouteMatched::class, function (RouteMatched $event) {
             if (tenancy()->initialized) {
                 return;
             }
@@ -519,7 +527,7 @@ class TenancyServiceProvider extends ServiceProvider
                 return;
             }
 
-            $hostResolver = app(\Platform\Tenancy\Services\TenantHostResolver::class);
+            $hostResolver = app(TenantHostResolver::class);
             $tenant = $hostResolver->resolve($event->request->getHost());
 
             if (! $tenant) {
@@ -541,7 +549,28 @@ class TenancyServiceProvider extends ServiceProvider
             // TenantAccessGate would have, via the shared
             // TenantUnavailableResponder - see that exception's own
             // docblock for the full mechanism.
-            throw new \Platform\Tenancy\Exceptions\TenantNotReadyHttpException($tenant);
+            throw new TenantNotReadyHttpException($tenant);
         });
+    }
+
+    /**
+     * TASK-MVP-008 (RISK_REGISTER.md R68). See `Platform\Tenancy\Exceptions\
+     * CentralSafeExceptionHandler`'s own docblock for the full root-cause
+     * record and why `Container::extend()` (not another `bootstrap/app.php`
+     * `$exceptions->render()` registration) is the mechanism that actually
+     * works here. `Container::extend()` applies regardless of registration
+     * order relative to `Webkul\Core\Providers\CoreServiceProvider`'s own
+     * `bind(ExceptionHandler::class, Handler::class)` - it decorates
+     * whatever object a future `$app->make(ExceptionHandler::class)` call
+     * builds, and that resolution only ever happens at actual
+     * exception-render time (`Illuminate\Foundation\Http\Kernel::
+     * renderException()`), long after every provider has booted.
+     */
+    protected function installCentralSafeExceptionHandler(): void
+    {
+        $this->app->extend(
+            ExceptionHandler::class,
+            fn ($handler) => new CentralSafeExceptionHandler($handler)
+        );
     }
 }
