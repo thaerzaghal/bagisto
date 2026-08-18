@@ -47,6 +47,7 @@ class ProductionReadinessCheck extends Command
             $this->checkProvisioningCredentials(),
             $this->checkAssetHelperTenancy(),
             $this->checkDeployedSource(),
+            $this->checkPublicSignup(),
             $this->checkSignupAbuseProtection(),
             $this->checkRedis(),
             $this->checkStripe(),
@@ -245,14 +246,74 @@ class ProductionReadinessCheck extends Command
             return $this->resultWarn('Signup abuse protection', 'Turnstile disabled - acceptable for an invited-only pilot; required before opening public self-service signup.');
         }
 
+        [$ok, $detail] = $this->signupAbuseProtectionStatus();
+
+        if (! $ok) {
+            return $this->resultFail('Signup abuse protection', "{$detail} Public signup will fail for every real merchant.");
+        }
+
+        return $this->resultPass('Signup abuse protection', $detail);
+    }
+
+    /**
+     * TASK-MVP-007. Reports the managed-onboarding product decision itself
+     * (`config('platform.signup.enabled')`, see config/platform.php's own
+     * docblock) - a SEPARATE row from `checkSignupAbuseProtection()` above,
+     * which reports whether Turnstile is armed regardless of whether public
+     * signup is even reachable. Disabled (the production default/posture)
+     * is a PASS, not a WARN - unlike "Turnstile disabled", "no public
+     * signup" is this project's own deliberate, approved posture for the
+     * initial commercial/pilot phase (docs/architecture/onboarding.md), not
+     * a gap to flag.
+     *
+     * When enabled, this deliberately does NOT re-derive the site/secret-key
+     * validation matrix - it reuses `signupAbuseProtectionStatus()`, the
+     * same helper `checkSignupAbuseProtection()` uses, so if public signup
+     * is ever enabled with Turnstile disabled or misconfigured, this row
+     * FAILS clearly instead of silently passing.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkPublicSignup(): array
+    {
+        if (! config('platform.signup.enabled')) {
+            return $this->resultPass('Public signup', 'disabled (managed onboarding) - merchants are onboarded via Platform Admin. See docs/architecture/onboarding.md.');
+        }
+
+        if (! config('platform.signup.turnstile.enabled')) {
+            return $this->resultFail('Public signup', 'enabled, but Turnstile abuse protection is disabled - public signup MUST NOT run without it.');
+        }
+
+        [$ok, $detail] = $this->signupAbuseProtectionStatus();
+
+        if (! $ok) {
+            return $this->resultFail('Public signup', "enabled, but abuse protection is not correctly configured: {$detail}");
+        }
+
+        return $this->resultPass('Public signup', "enabled - {$detail}");
+    }
+
+    /**
+     * TASK-MVP-007. Shared by `checkSignupAbuseProtection()` and
+     * `checkPublicSignup()` above - the single source of truth for whether
+     * Turnstile's own site/secret keys are actually present, so the two
+     * callers can never drift into disagreement about what "correctly
+     * configured" means. Deliberately reports ONLY the key-presence
+     * question, not whether Turnstile itself is enabled - each caller
+     * already handles that distinctly (WARN vs N/A vs FAIL).
+     *
+     * @return array{0: bool, 1: string}
+     */
+    protected function signupAbuseProtectionStatus(): array
+    {
         $siteKey = (string) config('platform.signup.turnstile.site_key');
         $secretKey = (string) config('platform.signup.turnstile.secret_key');
 
         if ($siteKey === '' || $secretKey === '') {
-            return $this->resultFail('Signup abuse protection', 'Turnstile is ENABLED but '.($siteKey === '' ? 'TURNSTILE_SITE_KEY' : 'TURNSTILE_SECRET_KEY').' is missing - public signup will fail for every real merchant.');
+            return [false, 'Turnstile is ENABLED but '.($siteKey === '' ? 'TURNSTILE_SITE_KEY' : 'TURNSTILE_SECRET_KEY').' is missing.'];
         }
 
-        return $this->resultPass('Signup abuse protection', 'Turnstile enabled, site key and secret key configured.');
+        return [true, 'Turnstile enabled, site key and secret key configured.'];
     }
 
     /** @return array{0: string, 1: string, 2: string} */

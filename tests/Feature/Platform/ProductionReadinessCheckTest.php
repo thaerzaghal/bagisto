@@ -227,3 +227,76 @@ test('12. fails when Turnstile is enabled but a key is missing, and never prints
     expect($output)->toContain('TURNSTILE_SECRET_KEY');
     $this->artisan('platform:production:check')->assertFailed();
 });
+
+// TASK-MVP-007. `Public signup` is a SEPARATE row from `Signup abuse
+// protection` above - it reports the managed-onboarding product decision
+// itself (config('platform.signup.enabled')), not Turnstile's own armed
+// status.
+test('13. passes with "disabled (managed onboarding)" when public signup is disabled - the production default', function () {
+    config([
+        'app.debug' => false,
+        'responsecache.enabled' => false,
+        'database.connections.tenant_provisioning.username' => 'provisioning_user',
+        'platform.signup.enabled' => false,
+    ]);
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('Public signup');
+    expect($output)->toContain('disabled (managed onboarding)');
+    $this->artisan('platform:production:check')->assertSuccessful();
+});
+
+test('14. passes when public signup is enabled with valid Turnstile protection', function () {
+    config([
+        'app.debug' => false,
+        'responsecache.enabled' => false,
+        'database.connections.tenant_provisioning.username' => 'provisioning_user',
+        'platform.signup.enabled' => true,
+        'platform.signup.turnstile.enabled' => true,
+        'platform.signup.turnstile.site_key' => 'a-real-site-key',
+        'platform.signup.turnstile.secret_key' => 'a-real-secret-key',
+    ]);
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('Public signup');
+    expect($output)->not->toContain('Public signup</error>');
+    $this->artisan('platform:production:check')->assertSuccessful();
+});
+
+test('15. fails when public signup is enabled but Turnstile is disabled - must not silently pass', function () {
+    config([
+        'app.debug' => false,
+        'responsecache.enabled' => false,
+        'platform.signup.enabled' => true,
+        'platform.signup.turnstile.enabled' => false,
+    ]);
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('Public signup');
+    expect($output)->toContain('MUST NOT run without it');
+    $this->artisan('platform:production:check')->assertFailed();
+});
+
+test('16. fails when public signup is enabled with Turnstile enabled but misconfigured - must not silently pass', function () {
+    config([
+        'app.debug' => false,
+        'responsecache.enabled' => false,
+        'platform.signup.enabled' => true,
+        'platform.signup.turnstile.enabled' => true,
+        'platform.signup.turnstile.site_key' => 'a-real-site-key',
+        'platform.signup.turnstile.secret_key' => '',
+    ]);
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('Public signup');
+    expect($output)->toContain('abuse protection is not correctly configured');
+    $this->artisan('platform:production:check')->assertFailed();
+});

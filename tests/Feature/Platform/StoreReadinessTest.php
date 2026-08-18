@@ -15,16 +15,20 @@
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
-use Platform\Plans\Models\Plan;
 use Platform\Admin\Models\PlatformUser;
+use Platform\Plans\Models\Plan;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Services\TenantProvisioner;
-use Webkul\Faker\Helpers\Product as ProductFaker;
+use Tests\Feature\Platform\PlatformIntegrationTestCase;
+use Tests\TestCase;
+use Webkul\Product\Models\Product;
 use Webkul\Product\Repositories\ProductImageRepository;
+use Webkul\Product\Repositories\ProductRepository;
 
-uses(Tests\Feature\Platform\PlatformIntegrationTestCase::class);
+uses(PlatformIntegrationTestCase::class);
 
 const MVP003_TENANT_A = 'mvp003-a';
 const MVP003_TENANT_B = 'mvp003-b';
@@ -68,7 +72,7 @@ function mvp003ChannelSnapshot(Tenant $tenant): array
     return $tenant->run(fn () => (array) DB::table('channels')->where('id', 1)->first());
 }
 
-function loginAsMvp003TenantAdmin(Tests\TestCase $test, string $domain, string $email = 'admin@example.com', string $password = 'admin123'): void
+function loginAsMvp003TenantAdmin(TestCase $test, string $domain, string $email = 'admin@example.com', string $password = 'admin123'): void
 {
     $test->post('http://'.$domain.'/admin/login', ['email' => $email, 'password' => $password]);
 }
@@ -81,7 +85,7 @@ function ensureMvp003PlatformAdmin(): void
     );
 }
 
-function loginAsMvp003PlatformAdmin(Tests\TestCase $test): void
+function loginAsMvp003PlatformAdmin(TestCase $test): void
 {
     $test->post('http://localhost/platform/login', [
         'email' => 'mvp003-platform-admin@example.test',
@@ -98,7 +102,7 @@ function loginAsMvp003PlatformAdmin(Tests\TestCase $test): void
  * per attribute-family and is Bagisto's own already-tested concern, not
  * what this test is verifying (tenant/channel correctness is).
  */
-function createProductViaRealAdminPath(Tests\TestCase $test, string $domain, string $sku): int
+function createProductViaRealAdminPath(TestCase $test, string $domain, string $sku): int
 {
     loginAsMvp003TenantAdmin($test, $domain);
 
@@ -115,7 +119,7 @@ function createProductViaRealAdminPath(Tests\TestCase $test, string $domain, str
     $id = (int) $m[1];
 
     Tenant::find(explode('.', $domain)[0])->run(function () use ($id) {
-        app(\Webkul\Product\Repositories\ProductRepository::class)->update([
+        app(ProductRepository::class)->update([
             'name' => 'MVP003 Product '.$id,
             'url_key' => 'mvp003-product-'.$id,
             'price' => 39.99,
@@ -127,13 +131,13 @@ function createProductViaRealAdminPath(Tests\TestCase $test, string $domain, str
             'description' => 'description',
         ], $id);
 
-        \Illuminate\Support\Facades\Event::dispatch('catalog.product.update.after', \Webkul\Product\Models\Product::find($id)->fresh());
+        Event::dispatch('catalog.product.update.after', Product::find($id)->fresh());
     });
 
     return $id;
 }
 
-function placeMinimalOrder(Tests\TestCase $test, string $domain, int $productId): void
+function placeMinimalOrder(TestCase $test, string $domain, int $productId): void
 {
     $test->postJson('http://'.$domain.'/api/checkout/cart', ['product_id' => $productId, 'quantity' => 1])->assertOk();
     $test->postJson('http://'.$domain.'/api/checkout/onepage/addresses', [
@@ -157,6 +161,11 @@ const MVP003_PRODUCT_SKUS = [
 ];
 
 beforeEach(function () {
+    // TASK-MVP-007. Production now defaults PUBLIC_SIGNUP_ENABLED to false
+    // (managed-only onboarding) - the A1/D1 tests below exercise the real
+    // /join flow directly, so they explicitly opt back in.
+    config(['platform.signup.enabled' => true]);
+
     $this->tenantA = ensureMvp003Tenant(MVP003_TENANT_A);
     $this->tenantB = ensureMvp003Tenant(MVP003_TENANT_B);
 
@@ -340,12 +349,12 @@ test('C3. a real shopper order is visible through the actual Bagisto Admin Sales
             ['qty' => 50]
         );
 
-        $product = \Webkul\Product\Models\Product::find($productId);
+        $product = Product::find($productId);
         app(ProductImageRepository::class)->upload([
             'images' => ['files' => [UploadedFile::fake()->image('photo.jpg', 20, 20)]],
         ], $product, 'images');
 
-        \Illuminate\Support\Facades\Event::dispatch('catalog.product.update.after', $product->fresh());
+        Event::dispatch('catalog.product.update.after', $product->fresh());
     });
 
     placeMinimalOrder($this, MVP003_TENANT_A.'.localhost', $productId);

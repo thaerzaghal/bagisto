@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use Platform\Signup\Http\Controllers\SignupController;
 use Platform\Signup\Http\Controllers\SignupRetryController;
 use Platform\Signup\Http\Middleware\EnsureCentralDomain;
+use Platform\Signup\Http\Middleware\EnsurePublicSignupEnabled;
 
 /**
  * TASK-MVP-001. Registered by Platform\Signup\Providers\
@@ -31,14 +32,30 @@ use Platform\Signup\Http\Middleware\EnsureCentralDomain;
  * `join/retry/*`'s own throttle is deliberately UNCHANGED and does NOT
  * go through Turnstile - authorization there is already a cryptographic
  * signed URL (never anonymous), a materially different risk profile.
+ *
+ * TASK-MVP-007. `EnsurePublicSignupEnabled` gates ONLY the two plain
+ * `join` routes below - anonymous, unauthenticated entry points - never
+ * `join/retry/*`. That distinction is deliberate, not an oversight: a
+ * retry URL is cryptographically signed and tied to an ALREADY-created
+ * tenant (from a prior, already-authorized attempt - either a public
+ * signup made while the flag was on, or a Platform-Admin-managed
+ * creation whose provisioning failed) - materially different from
+ * anonymous public registration, and explicitly required to keep working
+ * regardless of this flag so an in-progress onboarding can always be
+ * recovered. `config('platform.signup.enabled')` defaults to `false` -
+ * see config/platform.php's own docblock for the full product-decision
+ * record (managed-only onboarding for the initial commercial/pilot
+ * phase, docs/architecture/onboarding.md).
  */
 Route::middleware([EnsureCentralDomain::class, 'platform'])
     ->group(function () {
-        Route::get('join', [SignupController::class, 'create'])->name('signup.create');
+        Route::middleware(EnsurePublicSignupEnabled::class)->group(function () {
+            Route::get('join', [SignupController::class, 'create'])->name('signup.create');
 
-        Route::post('join', [SignupController::class, 'store'])
-            ->middleware('throttle:3,1')
-            ->name('signup.store');
+            Route::post('join', [SignupController::class, 'store'])
+                ->middleware('throttle:3,1')
+                ->name('signup.store');
+        });
 
         Route::get('join/retry/{tenant}', [SignupRetryController::class, 'show'])
             ->middleware('signed')

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Platform\Signup\Services;
 
 use Illuminate\Support\Facades\DB;
+use Platform\Plans\Models\Plan;
+use Platform\Subscriptions\Services\SubscriptionLifecycle;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Services\TenantProvisioner;
@@ -29,12 +31,23 @@ use Throwable;
  * leaves nothing to resume from except re-asking the merchant for their
  * password (see Platform\Signup\Http\Controllers\SignupRetryController) -
  * there is deliberately no "saved" password to retry with.
+ *
+ * TASK-MVP-007. `$plan`/`$storeName` are ADDITIVE, optional parameters on
+ * `register()` only (never `retry()` - a retried tenant already has
+ * whatever plan its original attempt started) so that `Platform\Admin\
+ * Http\Controllers\TenantController`'s managed-onboarding flow can reuse
+ * this exact same method - the same Tenant+Domain-creation transaction,
+ * the same `TenantProvisioner` call, the same success/failure contract -
+ * rather than duplicating any of it. Public `/join` never passes either
+ * argument, so its own behavior is byte-for-byte unchanged (both default
+ * to `null`, matching the shape they always had here).
  */
 class MerchantOnboarding
 {
-    public function __construct(protected TenantProvisioner $provisioner)
-    {
-    }
+    public function __construct(
+        protected TenantProvisioner $provisioner,
+        protected SubscriptionLifecycle $subscriptions,
+    ) {}
 
     /**
      * Creates the central Tenant + Domain rows (one transaction, so a
@@ -45,8 +58,24 @@ class MerchantOnboarding
      * a separate, non-transactional, cross-connection operation and must
      * run outside it, exactly like every other provisioning call site in
      * this codebase.
+     *
+     * `$plan`, when given, is started via `SubscriptionLifecycle::start()`
+     * - the SAME service/rules `Platform\Admin\Http\Controllers\
+     * TenantController::changePlan()` already uses (inactive-plan
+     * rejection included, `InactivePlanAssignmentException` propagates
+     * to the caller unchanged) - BEFORE `TenantProvisioner::provision()`
+     * runs, so `ensureInitialSubscriptionStarted()`'s own existing
+     * `if ($tenant->plan_id !== null) return;` guard correctly treats the
+     * plan as already assigned and never double-starts a second
+     * subscription. `$storeName`, when given, sets the tenant's default
+     * channel display name (`channel_translations.name`, ALL locale rows)
+     * after successful provisioning only - the identical `$tenant->run()`
+     * + `DB::table(...)->update()` shape `TenantProvisioner::
+     * ensureChannelHostnameCorrect()` already establishes for the sibling
+     * `channels.hostname` correction, just for a cosmetic field that step
+     * doesn't own.
      */
-    public function register(string $slug, string $domain, string $ownerName, string $ownerEmail, string $password): array
+    public function register(string $slug, string $domain, string $ownerName, string $ownerEmail, string $password, ?Plan $plan = null, ?string $storeName = null): array
     {
         $tenant = DB::transaction(function () use ($slug, $domain, $ownerName, $ownerEmail) {
             $tenant = Tenant::create([
@@ -61,7 +90,11 @@ class MerchantOnboarding
             return $tenant;
         });
 
-        return $this->attempt($tenant, $ownerName, $ownerEmail, $password);
+        if ($plan !== null) {
+            $this->subscriptions->start($tenant, $plan);
+        }
+
+        return $this->attempt($tenant, $ownerName, $ownerEmail, $password, $storeName);
     }
 
     /**
@@ -75,7 +108,7 @@ class MerchantOnboarding
         return $this->attempt($tenant, (string) $tenant->owner_name, (string) $tenant->owner_email, $password);
     }
 
-    protected function attempt(Tenant $tenant, string $ownerName, string $ownerEmail, string $password): array
+    protected function attempt(Tenant $tenant, string $ownerName, string $ownerEmail, string $password, ?string $storeName = null): array
     {
         try {
             $this->provisioner->provision($tenant, [
@@ -91,6 +124,14 @@ class MerchantOnboarding
             // expected, user-facing outcome (matching Platform Admin's
             // own provision()/TenantController precedent), not a 500.
             return ['tenant' => $tenant->fresh(), 'succeeded' => false];
+        }
+
+        if ($storeName !== null) {
+            $tenant->run(function () use ($storeName) {
+                DB::table('channel_translations')
+                    ->where('channel_id', 1)
+                    ->update(['name' => $storeName]);
+            });
         }
 
         return ['tenant' => $tenant->fresh(), 'succeeded' => true];

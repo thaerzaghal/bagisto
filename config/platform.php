@@ -36,6 +36,25 @@ return [
     'signup' => [
 
         /**
+         * TASK-MVP-007. Master switch for the entire PUBLIC, anonymous
+         * self-service signup flow (`GET`/`POST /join`) - see
+         * `Platform\Signup\Http\Middleware\EnsurePublicSignupEnabled`.
+         * `false` (the production default/posture) means both routes
+         * 404 - a deliberate PRODUCT decision, not a temporary flag: the
+         * initial commercial/pilot phase uses MANAGED onboarding only
+         * (Platform Admin creates merchants directly - see
+         * `Platform\Admin\Http\Controllers\TenantController::store()`),
+         * reusing the exact same `Platform\Signup\Services\
+         * MerchantOnboarding`/`TenantProvisioner` pipeline this flag
+         * gates for the public path. Does NOT affect the already-created-
+         * tenant signed retry flow (`/join/retry/{tenant}`), which stays
+         * available regardless of this flag - see that route's own
+         * docblock in `signup-routes.php` for why. See
+         * docs/architecture/onboarding.md for the full policy record.
+         */
+        'enabled' => (bool) env('PUBLIC_SIGNUP_ENABLED', false),
+
+        /**
          * TASK-MVP-001. Slugs a merchant may not claim as their own store
          * address, checked in addition to (never instead of) the
          * database-level uniqueness check against existing tenants. Kept

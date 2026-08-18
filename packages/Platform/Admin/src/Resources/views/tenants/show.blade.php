@@ -41,6 +41,14 @@
                 <button type="submit">Reactivate</button>
             </form>
         @endif
+
+        {{-- TASK-MVP-007. Does not re-run provisioning - see OwnerActivationMailer. --}}
+        @if ($tenant->status === \Platform\Tenancy\Enums\TenantStatus::Ready)
+            <form class="inline" method="POST" action="{{ route('platform.tenants.resend-activation', $tenant->getTenantKey()) }}">
+                @csrf
+                <button type="submit">Resend activation email</button>
+            </form>
+        @endif
     </p>
 
     <div class="card" style="margin-top: 1.5rem; max-width: 480px;">

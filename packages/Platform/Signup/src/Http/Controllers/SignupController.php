@@ -12,8 +12,7 @@ use Illuminate\View\View;
 use Platform\Signup\Http\SignupResultResponder;
 use Platform\Signup\Services\MerchantOnboarding;
 use Platform\Signup\Services\TurnstileVerifier;
-use Platform\Tenancy\Models\Tenant;
-use Stancl\Tenancy\Database\Models\Domain;
+use Platform\Signup\Support\SignupValidationRules;
 
 /**
  * TASK-MVP-001. The public, unauthenticated merchant signup entry point.
@@ -30,7 +29,11 @@ use Stancl\Tenancy\Database\Models\Domain;
  * resolves through the `Tenant`/`Domain` models directly instead,
  * which is safe regardless of ambient connection state - the same fix
  * R42 already established, applied here from the start rather than
- * discovered the hard way a second time.
+ * discovered the hard way a second time. TASK-MVP-007: the slug/owner-
+ * email rules themselves now live in `Platform\Signup\Support\
+ * SignupValidationRules`, shared verbatim with `Platform\Admin\Http\
+ * Controllers\TenantController`'s managed-onboarding form - one policy,
+ * never two independently-maintained copies.
  *
  * TASK-MVP-006. `TurnstileVerifier::verify()` runs AFTER cheap local
  * validation but BEFORE `MerchantOnboarding::register()` - every real
@@ -77,54 +80,9 @@ class SignupController
     protected function validated(Request $request): array
     {
         $validator = Validator::make($request->all(), [
-            'slug' => [
-                'required',
-                'string',
-                'min:3',
-                'max:32',
-                // R19 (RISK_REGISTER.md): the physical tenant database
-                // name is 'tenant'.$id, backtick-quoted but never
-                // escaped by stancl/tenancy's own MySQLDatabaseManager -
-                // this allowlist closes that gap at the input boundary
-                // (no character this regex permits can break out of a
-                // backtick-quoted MySQL identifier) while simultaneously
-                // guaranteeing a valid DNS subdomain label.
-                'regex:/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/',
-                function ($attribute, $value, $fail) {
-                    $reserved = array_merge(
-                        config('platform.signup.reserved_slugs', []),
-                        config('tenancy.central_domains', []),
-                    );
-
-                    if (in_array($value, $reserved, true)) {
-                        $fail('That store address is reserved. Please choose another.');
-                    }
-                },
-                function ($attribute, $value, $fail) {
-                    if (Tenant::whereKey($value)->exists()) {
-                        $fail('That store address is already taken.');
-                    }
-                },
-                function ($attribute, $value, $fail) {
-                    $domain = $value.'.'.config('platform.base_domain');
-
-                    if (Domain::where('domain', $domain)->exists()) {
-                        $fail('That store address is already taken.');
-                    }
-                },
-            ],
+            'slug' => SignupValidationRules::slug(),
             'owner_name' => ['required', 'string', 'max:255'],
-            'owner_email' => [
-                'required',
-                'string',
-                'email',
-                'max:255',
-                function ($attribute, $value, $fail) {
-                    if (Tenant::where('owner_email', $value)->exists()) {
-                        $fail('An account with that email already exists.');
-                    }
-                },
-            ],
+            'owner_email' => SignupValidationRules::ownerEmail(),
             'password' => ['required', 'string', 'min:8', 'confirmed'],
         ]);
 

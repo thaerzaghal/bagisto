@@ -82,6 +82,12 @@ beforeEach(function () {
     Cache::flush(); // isolates the rate-limit test from every other test's own /join hits.
     config(['platform.plans.default_code' => 'free']);
     config(['platform.signup.turnstile.enabled' => false]);
+    // TASK-MVP-007. Production now defaults PUBLIC_SIGNUP_ENABLED to false
+    // (managed-only onboarding) - this whole file exists to prove
+    // Turnstile's own behavior WHEN public signup is reachable, so it
+    // explicitly opts back in. See PublicSignupFlagTest.php for the
+    // disabled-by-default behavior itself.
+    config(['platform.signup.enabled' => true]);
 });
 
 afterEach(fn () => cleanupTurnstileTestTenants());

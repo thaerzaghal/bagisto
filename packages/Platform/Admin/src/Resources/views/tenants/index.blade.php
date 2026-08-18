@@ -3,6 +3,8 @@
 @section('content')
     <h1>Tenants</h1>
 
+    <p><a href="{{ route('platform.tenants.create') }}">+ Create Merchant</a></p>
+
     <table>
         <thead>
             <tr>

@@ -12,14 +12,17 @@
 
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Testing\TestResponse;
 use Platform\Plans\Models\Plan;
 use Platform\Subscriptions\Enums\SubscriptionStatus;
 use Platform\Subscriptions\Models\Subscription;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Stancl\Tenancy\Database\Models\Domain;
+use Tests\Feature\Platform\PlatformIntegrationTestCase;
 
-uses(Tests\Feature\Platform\PlatformIntegrationTestCase::class);
+uses(PlatformIntegrationTestCase::class);
 
 // R40-class discipline: a dedicated fixture prefix, never tenant-a/tenant-b
 // or any other file's shared fixtures.
@@ -70,7 +73,7 @@ function signupPayload(string $slug, array $overrides = []): array
 }
 
 /**
- * @return array{0: \Illuminate\Testing\TestResponse, 1: array<int, string|null>}
+ * @return array{0: TestResponse, 1: array<int, string|null>}
  */
 function captureQueriedConnectionsDuringSignup(callable $callback): array
 {
@@ -87,6 +90,11 @@ beforeEach(function () {
     cleanupSignupTestTenants();
     Cache::flush(); // isolates the rate-limiting test from every other test's own /join hits.
     config(['platform.plans.default_code' => 'free']);
+    // TASK-MVP-007. Production now defaults PUBLIC_SIGNUP_ENABLED to false
+    // (managed-only onboarding) - this whole file exists to prove the
+    // PUBLIC signup flow's own behavior, so it explicitly opts back in.
+    // See PublicSignupFlagTest.php for the disabled-by-default behavior.
+    config(['platform.signup.enabled' => true]);
 });
 
 afterEach(fn () => cleanupSignupTestTenants());
@@ -114,8 +122,8 @@ test('2-4, 7, 14. a fresh merchant can self-register: Tenant+Domain created cent
     expect($tenant->database()->manager()->databaseExists($tenant->database()->getName()))->toBeTrue();
     $tenant->run(function () {
         expect(DB::connection()->getDatabaseName())->not->toBe('bagisto_central');
-        expect(\Illuminate\Support\Facades\Schema::hasTable('products'))->toBeTrue();
-        expect(\Illuminate\Support\Facades\Schema::hasTable('admins'))->toBeTrue();
+        expect(Schema::hasTable('products'))->toBeTrue();
+        expect(Schema::hasTable('admins'))->toBeTrue();
     });
 
     // Default plan + Active subscription, through the existing,
