@@ -113,7 +113,17 @@ Platform\Admin -> Tenancy, Plans, Subscriptions, Billing (reads their central mo
 
 # Current Git Baseline
 
-Branch `2.4`, latest approved/committed commit as of TASK-MVP-006: `6c31300542b711adfb1b5fc8c2e3c3be6e2b7942` ("feat(platform): protect public signup with turnstile"). 23 commits ahead of `origin/2.4`, not pushed. TASK-MVP-007's own changes are implemented and tested but NOT YET COMMITTED as of this review - pending explicit approval. This is a point-in-time baseline — check `git log`/`git status` fresh rather than trusting this file if it's been a while.
+Branch `2.4`, HEAD `ce01b9eac6220fb170cbb4d3aaaefe16fb866068`. 28 commits ahead of `origin/2.4`, 0 behind, cleared for push following the TASK-MVP-009 source-safety checkpoint. TASK-MVP-007 (managed merchant onboarding) and TASK-MVP-008 (central-host exception rendering safety, R68) are both **COMPLETED** - implemented, tested, deployed, and proven live in production.
+
+Current production posture:
+- `PUBLIC_SIGNUP_ENABLED=false` - managed Platform Admin onboarding ("Create Merchant") is the active merchant-acquisition path.
+- Turnstile remains implemented and ready for whenever public signup is re-enabled.
+- Email/password-reset delivery is live (real SMTP), including the tenant-domain-correct activation link (R69 fixed).
+- Local and R2 offsite backups are both healthy and restore-proven.
+- Production `APP_COMMIT` matches the deployed source tree exactly.
+- `packages/Webkul/*` remains completely untouched across the entire 28-commit range.
+
+This is a point-in-time baseline — check `git log`/`git status` fresh rather than trusting this file if it's been a while.
 
 # Completed Foundation
 
@@ -140,7 +150,7 @@ Every task closed with a full evidence-based report (real HTTP requests, real My
 - R50 (abandoned `booted()`-callback middleware-attachment technique for one specific route) — development-only, the shipped welcome-banner feature does not depend on it — safe to defer.
 - R51 (Vite manifest gap for two Admin-theme placeholder assets, TASK-MVP-003) — **re-checked fresh during the MVP final readiness review (2026-08-16) and found NOT REPRODUCIBLE**: both `src/Resources/assets/images/product-placeholders/front.svg` and `.../icon-add-product.svg` resolve correctly through the real, currently-committed `public/themes/admin/default/build/manifest.json` (verified live via a direct `Vite::asset()` call in the same Docker test environment - no exception). Whatever caused the original observation is no longer present; recommend closing outright rather than carrying as an open risk. If it resurfaces during TASK-MVP-004B, a normal `npm run build` for the Admin theme is the correct fix, not an application code change.
 
-Everything else in the register (R1-R60, R63, minus the above) is RESOLVED/CLOSED with live evidence. R61/R62 (found during TASK-MVP-003B) remain open, Low priority, deliberately not folded into any subsequent task's scope - see RISK_REGISTER.md.
+Everything else in the register (R1-R60, R63, R64-R69, minus the above) is RESOLVED/CLOSED with live evidence, including R68 (TASK-MVP-008, central-host exception rendering safety). R61/R62 (found during TASK-MVP-003B) and R70 (found as a byproduct of TASK-MVP-008 - Platform Admin's unauthenticated redirect lands on the shop customer login instead of its own) remain open, Low priority, deliberately not folded into any subsequent task's scope - see RISK_REGISTER.md.
 
 **MVP final readiness review (2026-08-16)**: no application-level blocker found. See the "MVP FINAL READINESS REPORT" delivered at this checkpoint for the full journey-by-journey evidence (merchant onboarding, merchant operations, shopper checkout, Platform Owner - all READY FOR PILOT), the mail-under-`sync` investigation (order placement succeeds independently of mail delivery - `Webkul\Shop\Listeners\Base::prepareMail()` and `Webkul\Shop\Listeners\Order::afterCreated()` both already catch and log any mail exception, including an unconfigured-SMTP `RuntimeException`, without affecting the HTTP response - confirmed via direct source reading of Bagisto's own unmodified code, a structural guarantee, not merely observed behavior), and the R51 re-check above. **Application MVP feature scope is now frozen for the pilot** - see "Post-MVP / explicitly deferred" below for what requires a new product decision before being pulled back in. Remaining work is entirely TASK-MVP-004B (infrastructure/deployment), not further application development.
 
@@ -171,7 +181,11 @@ Everything else in the register (R1-R60, R63, minus the above) is RESOLVED/CLOSE
 
 ~~TASK-MVP-006 — Production Deployment Source-of-Truth Safeguards, then Public Signup Abuse Protection (Cloudflare Turnstile).~~ **DONE, committed, approved.** Closes R65/R66.
 
-**TASK-MVP-007 — Managed Merchant Onboarding / Disable Public Signup.** Why: limited initial server capacity + real per-tenant cost + a small expected initial merchant count make curated, operator-driven onboarding the right posture for the initial commercial/pilot phase - not a readiness gap, a deliberate choice. Outcome: `PUBLIC_SIGNUP_ENABLED` flag (`/join` 404s cleanly when off, zero side effects, signed retry unaffected); Platform Admin "Create Merchant" flow reusing `MerchantOnboarding::register()` verbatim; random-then-discarded temporary password + real Admin password-reset broker for activation (no plaintext password ever operator-visible or persisted); `platform:production:check` `Public signup` row; `docs/architecture/onboarding.md`. Depends on: nothing new architecturally - reuses TASK-MVP-001/004/006's existing services. Size: M. **DONE - pending commit approval as of this review.**
+~~TASK-MVP-007 — Managed Merchant Onboarding / Disable Public Signup.~~ Why: limited initial server capacity + real per-tenant cost + a small expected initial merchant count make curated, operator-driven onboarding the right posture for the initial commercial/pilot phase - not a readiness gap, a deliberate choice. Outcome: `PUBLIC_SIGNUP_ENABLED` flag (`/join` 404s cleanly when off, zero side effects, signed retry unaffected); Platform Admin "Create Merchant" flow reusing `MerchantOnboarding::register()` verbatim; random-then-discarded temporary password + real Admin password-reset broker for activation (no plaintext password ever operator-visible or persisted); `platform:production:check` `Public signup` row; `docs/architecture/onboarding.md`. Depends on: nothing new architecturally - reuses TASK-MVP-001/004/006's existing services. Size: M. **DONE, committed, approved, proven live in production.**
+
+~~TASK-MVP-008 — Fix R68: Central-Host Exception Rendering Safety.~~ Why: found live as a byproduct of TASK-MVP-007's own R67 hotfix - a broader-than-signup defect where any central-domain request reaching the app with tenancy never initialized (a CSRF failure, an unmatched/verb-mismatched route, a throttle rejection) crashed with a raw 500 instead of a clean error response, because Webkul's own fallback error view unconditionally queries tenant-only tables. Outcome: `Platform\Tenancy\Exceptions\CentralSafeExceptionHandler`, a `Container::extend()` decorator around whatever handler Webkul bound - zero `packages/Webkul/*` changes. Proven live in production (419/405/429 all render cleanly; unknown-domain, real tenant, and Platform Admin behavior all unaffected; `platform:production:check` all-PASS). A self-found regression (the first deployed version incorrectly 500'd `AuthenticationException`, breaking Platform Admin's own unauthenticated redirect) was caught and fixed within the same task, before being reported complete. R70 (a separate, pre-existing, low-severity wrong-redirect-TARGET defect, unrelated to this fix) was found as a byproduct and deliberately left open. Depends on: nothing new architecturally. Size: M. **DONE, committed, approved, proven live in production.** Closes R68.
+
+~~TASK-MVP-009 — Source Safety / Release Checkpoint.~~ Why: 28 commits had accumulated ahead of `origin/2.4`, never pushed - before pushing, a strictly read-only audit was warranted (secrets/history, runtime artifacts, `packages/Webkul/*` untouched, composer/lint/test health, production `APP_COMMIT` match, backup health, CI-trigger/cost review, open-risk review, this file's own drift). Outcome: everything came back clean; this file's own "current state" sections were found materially stale (this update) and corrected as a narrow, documentation-only exception to the checkpoint's own read-only scope. Depends on: nothing new architecturally. Size: S. **DONE, committed, approved.** `2.4` cleared for push to `origin`.
 
 **Post-MVP / explicitly deferred** (do not pull forward without a real merchant need):
 - Real (non-Stripe) payment gateway integration — explicit product-owner decision: Palestine payment options are limited, pending bank/provider coordination, not a blocker.
@@ -191,7 +205,7 @@ See the "Post-MVP / explicitly deferred" list immediately above — treat that l
 
 # Next Task
 
-None assigned as of TASK-MVP-007's completion. The platform is live in production (`technify.dev`) with managed-only merchant onboarding; real merchants are added by the operator through Platform Admin's "Create Merchant" action. No further task should be started without explicit instruction - see this document's own "How To Continue In A New Chat" note below.
+None assigned after TASK-MVP-009's source-safety checkpoint. The platform is live in production (`technify.dev`) with managed-only merchant onboarding; real merchants are added by the operator through Platform Admin's "Create Merchant" action. No further task should be started without explicit instruction - see this document's own "How To Continue In A New Chat" note below.
 
 # How To Continue In A New Chat
 
