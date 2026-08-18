@@ -145,15 +145,65 @@ Uses **only** supported Platform commands - never `bagisto:install`, a bare `php
 
 ```
 1. Pull/deploy new source
-2. composer install --no-dev --optimize-autoloader
-3. php artisan platform:migrate:central          (central schema changes)
-4. php artisan platform:tenants:migrate-pending  (existing tenants pick up new tenant-scoped migrations)
-5. php artisan config:cache / route:cache / view:cache   (optional, standard Laravel perf step)
-6. Restart the queue worker, only if one is running (section I) - it must reload new code
-7. Rebuild frontend assets (Admin/Shop themes), only if this deploy changed frontend source
+2. echo the deployed git commit: git rev-parse HEAD > APP_COMMIT (included in the
+   synced source tree - see "Deployment source of truth" below)
+3. composer install --no-dev --optimize-autoloader
+4. php artisan platform:migrate:central          (central schema changes)
+5. php artisan platform:tenants:migrate-pending  (existing tenants pick up new tenant-scoped migrations)
+6. php artisan config:cache / route:cache / view:cache   (optional, standard Laravel perf step)
+7. Restart the queue worker, only if one is running (section I) - it must reload new code
+8. Rebuild frontend assets (Admin/Shop themes), only if this deploy changed frontend source
 ```
 
 Reuses `platform:migrate:central`/`platform:tenants:migrate-pending` exactly as already built - no new deployment framework.
+
+### Deployment source of truth (RISK_REGISTER.md R65)
+
+**The host source tree (`/opt/estore/app/` on the real pilot server) is the
+one thing every deployment - a plain `docker cp` config patch, a full
+`docker compose build`, a container recreate - is ultimately built from.**
+A real incident (2026-08-18, R65) proved what happens when this is violated:
+a hotfix (R63, `config/tenancy.php`'s `asset_helper_tenancy`) was applied
+directly into a RUNNING CONTAINER's writable layer only, via `docker cp`,
+without also updating the host source tree. The running application looked
+completely correct - verified live, in a real browser - for days. A later,
+entirely unrelated, legitimate deployment (TASK-MVP-005, which needed a real
+image rebuild for a new Composer dependency) rebuilt the image from the
+still-stale host source tree, silently discarding the hotfix the moment the
+container was recreated. Nothing about that later deployment was wrong in
+isolation; the actual defect was introduced days earlier, the moment the
+hotfix was applied to the container instead of the source.
+
+**The rule, going forward: a hotfix is never "done" until the host source
+tree matches it.** If a fix is urgent enough to apply directly to a running
+container first (acceptable for restoring service quickly), the VERY NEXT
+step - before considering the incident closed - is applying the identical
+change to the host source tree (`/opt/estore/app/`), not "later" or "next
+deploy." `docker cp`/`docker exec` patches are a legitimate FAST PATH to
+restore service; they are never a substitute for updating the source of
+truth a future rebuild will read from.
+
+**Drift detection.** Two small, deliberately narrow additions (not a general
+config-audit framework):
+
+1. **`APP_COMMIT` marker** (step 2 above) - a plain text file containing the
+   git commit hash actually deployed, written fresh by the deploy process
+   itself (never committed to git - it would go stale the instant a new
+   commit landed; see `.gitignore`). Already read by
+   `Platform\Backup\Services\BackupRunner::appCommit()` (previously always
+   `null`, since no deploy step had ever written it) and now also reported
+   by `php artisan platform:production:check`'s new `Deployed source` row -
+   WARN if the marker is missing, PASS with the commit hash if present. This
+   does not itself prove the deployed FILES match that commit (no `.git`
+   exists inside the production image, by design - see `.dockerignore`) -
+   it closes the narrower, more important gap that let R65 go undetected:
+   there was previously no way to even ASK "what commit is this server
+   running" without manually inspecting individual files by hand.
+2. **A concrete regression guard** for the exact value that actually broke:
+   `platform:production:check`'s new `asset_helper_tenancy` row FAILS the
+   command outright if `config('tenancy.filesystem.asset_helper_tenancy')`
+   is ever anything other than `false` - not a generic audit, one targeted
+   assertion for one already-proven-dangerous value (RISK_REGISTER.md R63).
 
 ## Q. `packages/Webkul/*` is not our customization surface
 

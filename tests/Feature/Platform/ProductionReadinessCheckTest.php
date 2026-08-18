@@ -11,8 +11,9 @@
  */
 
 use Illuminate\Support\Facades\Artisan;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class);
+uses(TestCase::class);
 
 test('1. exits successfully against a production-shaped configuration', function () {
     config([
@@ -98,4 +99,71 @@ test('6. warns (does not fail the exit code) when Stripe is intentionally unconf
 
     putenv('TRUSTED_PROXIES');
     putenv('PLATFORM_CENTRAL_DOMAINS');
+});
+
+test('7. fails and reports asset_helper_tenancy=true as a FAIL (R63/R65 regression guard)', function () {
+    config(['app.debug' => false, 'responsecache.enabled' => false, 'tenancy.filesystem.asset_helper_tenancy' => true]);
+
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+
+    expect($output)->toContain('asset_helper_tenancy');
+    expect($output)->toContain('FAIL');
+    $this->artisan('platform:production:check')->assertFailed();
+});
+
+test('8. passes asset_helper_tenancy when it is false, the correct value', function () {
+    config(['tenancy.filesystem.asset_helper_tenancy' => false]);
+
+    Artisan::call('platform:production:check');
+
+    expect(Artisan::output())->not->toContain('asset_helper_tenancy</error>');
+});
+
+test('9. reports the deployed APP_COMMIT marker when present, and warns (not fails) when absent', function () {
+    $productionShaped = [
+        'app.debug' => false,
+        'platform.base_domain' => 'app.example.test',
+        'tenancy.central_domains' => ['app.example.test'],
+        'cache.default' => 'redis',
+        'session.driver' => 'database',
+        'responsecache.enabled' => false,
+        'database.connections.tenant_provisioning.username' => 'provisioning_user',
+        'platform-billing.stripe.secret' => 'sk_test_configured',
+        'mail.mailers.smtp.host' => 'smtp.real-provider.test',
+        'mail.mailers.smtp.port' => '587',
+        'tenancy.filesystem.asset_helper_tenancy' => false,
+    ];
+
+    $marker = base_path('APP_COMMIT');
+    $existed = is_file($marker);
+    $original = $existed ? file_get_contents($marker) : null;
+
+    putenv('TRUSTED_PROXIES=10.0.0.5');
+    putenv('PLATFORM_CENTRAL_DOMAINS=app.example.test');
+
+    file_put_contents($marker, "abc1234\n");
+    config($productionShaped);
+    Artisan::call('platform:production:check');
+    expect(Artisan::output())->toContain('abc1234');
+
+    unlink($marker);
+    config($productionShaped);
+    Artisan::call('platform:production:check');
+    $output = Artisan::output();
+    expect($output)->toContain('Deployed source');
+    expect($output)->toContain('WARN');
+    // A missing deploy marker is a visibility gap, not a misconfiguration -
+    // it must never fail the command's own exit code.
+    config($productionShaped);
+    $this->artisan('platform:production:check')->assertSuccessful();
+
+    putenv('TRUSTED_PROXIES');
+    putenv('PLATFORM_CENTRAL_DOMAINS');
+
+    if ($existed) {
+        file_put_contents($marker, $original);
+    } else {
+        @unlink($marker);
+    }
 });

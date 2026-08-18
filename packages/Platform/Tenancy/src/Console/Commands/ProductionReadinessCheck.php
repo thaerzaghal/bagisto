@@ -45,6 +45,8 @@ class ProductionReadinessCheck extends Command
             $this->checkSessionDriver(),
             $this->checkResponseCache(),
             $this->checkProvisioningCredentials(),
+            $this->checkAssetHelperTenancy(),
+            $this->checkDeployedSource(),
             $this->checkRedis(),
             $this->checkStripe(),
             $this->checkMail(),
@@ -157,6 +159,65 @@ class ProductionReadinessCheck extends Command
         }
 
         return $this->resultPass('DB_PROVISION_USERNAME', 'configured, not root');
+    }
+
+    /**
+     * A real production regression (2026-08-18, deployment-drift incident -
+     * see RISK_REGISTER.md R65): `config('tenancy.filesystem.asset_helper_tenancy')`
+     * MUST stay `false` (RISK_REGISTER.md R63) - `true` (stancl/tenancy's own
+     * package default) breaks the tenant Admin/Storefront Vue app entirely by
+     * routing Bagisto's own compiled build assets through the tenant-storage
+     * asset route instead of their real public path. R63's fix was proven
+     * live once already; this incident showed the value can silently regress
+     * via an unrelated image rebuild if the deployed host source tree ever
+     * drifts from the approved git commit (see docs/architecture/
+     * production-deployment.md "Deployment source of truth" for the full
+     * incident and the durable process fix). A narrow, explicit FAIL here -
+     * not a WARN - because this specific value has a KNOWN, already-proven
+     * correct answer; there is no legitimate reason for it to ever be `true`
+     * in this project.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkAssetHelperTenancy(): array
+    {
+        if (config('tenancy.filesystem.asset_helper_tenancy') !== false) {
+            return $this->resultFail('asset_helper_tenancy', 'is NOT false - this WILL break tenant Admin/Storefront asset loading entirely (RISK_REGISTER.md R63/R65). Set config/tenancy.php\'s filesystem.asset_helper_tenancy to false and redeploy from the approved git source.');
+        }
+
+        return $this->resultPass('asset_helper_tenancy', 'false');
+    }
+
+    /**
+     * RISK_REGISTER.md R65. Reports the git commit this deployment claims to
+     * be running, read from a plain `APP_COMMIT` file at the app root -
+     * written fresh by the deployment process itself (`git rev-parse HEAD`),
+     * never committed to git (it would go stale the instant a new commit
+     * landed). Deliberately best-effort/observational, the same posture
+     * `Platform\Backup\Services\BackupRunner::appCommit()` already uses for
+     * this identical file - this check exists to make "what source is this
+     * server actually running" visible to a human at a glance, closing the
+     * exact blind spot that let R65's deployment drift go undetected until
+     * a human happened to look at the real browser. It cannot itself verify
+     * the deployed FILES match that commit (no `.git` exists inside the
+     * production image, by design - see `.dockerignore`) - only that a
+     * commit marker was set at all. `checkAssetHelperTenancy()` above is the
+     * concrete, self-verifying safeguard; this row is the general-purpose
+     * "what am I actually running" visibility improvement.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkDeployedSource(): array
+    {
+        $marker = base_path('APP_COMMIT');
+
+        if (! is_file($marker)) {
+            return $this->resultWarn('Deployed source', 'no APP_COMMIT marker found - this deployment cannot report which git commit it was built from. See docs/architecture/production-deployment.md "Deployment source of truth".');
+        }
+
+        $commit = trim((string) file_get_contents($marker));
+
+        return $this->resultPass('Deployed source', $commit !== '' ? $commit : '(APP_COMMIT file is empty)');
     }
 
     /** @return array{0: string, 1: string, 2: string} */

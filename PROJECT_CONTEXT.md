@@ -95,6 +95,7 @@ Platform\Admin -> Tenancy, Plans, Subscriptions, Billing (reads their central mo
 - Money is always an integer minor-unit value (`amount_minor`), never a float; currency is a plain normalized string, no hardcoded currency allowlist.
 - Stripe is a reference/sandbox adapter only — not a production commitment. A real payment gateway (likely a Palestinian bank/provider) remains an open, deliberately deferred business decision; `PaymentProvider` exists specifically so that choice costs nothing architecturally later.
 - Test fixtures: `PlatformIntegrationTestCase` disables `DatabaseTransactions` for its files — shared fixture tenants (`tenant-a`/`tenant-b` etc.) persist real state across test runs; never use a shared fixture tenant as a scratch/smoke-test subject (this has caused real, repeated regressions — see RISK_REGISTER R40).
+- **Production deployment source of truth: the host source tree at `/opt/estore/app/` on the real pilot server, never a running container's writable layer.** A `docker cp`/`docker exec` patch into a live container is a legitimate fast path to restore service, but is never "done" until the identical change also lands in that host directory — a later, unrelated image rebuild (`docker compose build`) reads ONLY from there and will silently discard any fix that only ever lived in a container layer (this happened for real — see RISK_REGISTER R65). Every deploy now writes `git rev-parse HEAD > APP_COMMIT` into the deployed tree so `platform:production:check` can report what commit is actually running.
 
 # Local Development / Testing
 

@@ -1,5 +1,10 @@
 .agents
 .agent*
+# TASK-MVP-006/R65. Deploy-time-only marker (git commit hash of what was
+# actually deployed) - written fresh by the deployment process itself
+# (`git rev-parse HEAD > APP_COMMIT`), never committed - see
+# docs/architecture/production-deployment.md "Deployment source of truth".
+/APP_COMMIT
 .claude
 .cursor
 .env
