@@ -179,3 +179,31 @@ test('7. a normal, resolved, initialized tenant request is completely unaffected
 
     $response->assertOk();
 });
+
+test('8. an unauthenticated central Platform Admin request still redirects (a real 3xx), never a generic 500 (real production regression, found and fixed within this same task)', function () {
+    // AuthenticationException is neither TokenMismatchException nor
+    // HttpExceptionInterface, and tenancy is never initialized for a
+    // central 'platform'-group route - the exact combination that, in
+    // this class's FIRST deployed version, was incorrectly treated as
+    // "unsafe" and rendered a generic 500 instead of delegating to
+    // Webkul's own already-safe handleAuthenticationException() callback
+    // (a plain redirect, no themed view, no tenant DB dependency at all).
+    //
+    // NOT asserting the specific redirect TARGET here: found, while
+    // building this exact test, that Webkul's own handleAuthenticationException()
+    // callback ignores Platform\Admin\Http\Middleware\Authenticate's own
+    // redirectTo() override entirely and derives its redirect purely from
+    // the URL path prefix (admin/* vs everything else) - so an
+    // unauthenticated /platform/* request redirects to the SHOP customer
+    // login, not platform.login. This is a real, separate, PRE-EXISTING
+    // defect (predates this task entirely - config('app.debug')=true
+    // masked it the same way it masked R51/R57/R67/R68 themselves),
+    // recorded as its own new finding (RISK_REGISTER.md, see the entry
+    // added alongside this task) rather than silently fixed or silently
+    // ignored here - out of scope for R68, which is only about "never
+    // 500", not about which login page a redirect points to.
+    $response = $this->get('http://localhost/platform/tenants');
+
+    expect($response->getStatusCode())->toBeGreaterThanOrEqual(300);
+    expect($response->getStatusCode())->toBeLessThan(400);
+});

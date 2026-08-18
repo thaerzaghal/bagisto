@@ -123,6 +123,36 @@ use Throwable;
  * with its own `render()` method (now or in the future) is ALWAYS
  * delegated to the inner handler, never intercepted here, regardless of
  * tenancy state.
+ *
+ * SECOND CRITICAL EXCLUSION, found live in production immediately after
+ * this class's first deploy (not merely assumed): confirmed, by
+ * inspecting the actual view files shipped, that `packages/Webkul/Shop`
+ * and `packages/Webkul/Admin` each ship EXACTLY ONE error view -
+ * `errors/index.blade.php` - no `errors/401`/`403`/`404`/`503` views
+ * exist at all, so Webkul's own "allowed" status codes fall back to the
+ * identical tenant-dependent `errors.index` view too. That is NOT this
+ * class's problem to solve for exception types Webkul already renders
+ * SAFELY without ever reaching that view - `Illuminate\Auth\
+ * AuthenticationException` (an unauthenticated Platform Admin request,
+ * e.g. a plain `GET /platform/tenants`) is exactly this case:
+ * `Webkul\Core\Exceptions\Handler::handleAuthenticationException()` is
+ * registered BEFORE its own catch-all `handleServerException()`
+ * (`register()`'s own call order), so `renderViaCallbacks()` matches it
+ * first and returns a plain redirect/401 JSON - no view render, no
+ * tenant DB dependency, at all. This class's FIRST deployed version
+ * treated "not TokenMismatchException, not HttpExceptionInterface" as
+ * uniformly unsafe and rendered a generic 500 for it - silently
+ * breaking Platform Admin's own login redirect for every unauthenticated
+ * visit in production, found and fixed within the same task before
+ * being reported as complete. The corrected design: for anything that
+ * is not `TokenMismatchException`/`HttpExceptionInterface`, ATTEMPT
+ * delegation to the inner handler first (safe for `AuthenticationException`/
+ * `ValidationException`/`HttpResponseException`/any other exception type
+ * Laravel or Webkul already renders without a themed view, now or in the
+ * future) - only fall back to this class's own minimal response if that
+ * delegation attempt ITSELF throws a SECONDARY exception, which is the
+ * genuine, narrow signature of "this really did fall through to
+ * `handleServerException()`'s tenant-dependent view and crashed."
  */
 class CentralSafeExceptionHandler implements ExceptionHandler
 {
@@ -149,11 +179,29 @@ class CentralSafeExceptionHandler implements ExceptionHandler
             return $this->inner->render($request, $e);
         }
 
-        if ($this->shouldRenderDirectly()) {
+        if (! $this->shouldRenderDirectly()) {
+            return $this->inner->render($request, $e);
+        }
+
+        // TokenMismatchException and any well-formed HttpExceptionInterface
+        // are UNIFORMLY unsafe to delegate here - confirmed Webkul ships no
+        // per-status error view at all (only errors.index, tenant-dependent
+        // regardless of status code), so even an "allowed" status would
+        // still crash.
+        if ($e instanceof TokenMismatchException || $e instanceof HttpExceptionInterface) {
             return $this->renderDirectly($e);
         }
 
-        return $this->inner->render($request, $e);
+        // Anything else (AuthenticationException, ValidationException, a
+        // genuinely unexpected bug, ...): try delegating first - many of
+        // these are already safe (see this class's own docblock). Only
+        // fall back to a generic, safe response if delegation itself
+        // throws a SECONDARY exception.
+        try {
+            return $this->inner->render($request, $e);
+        } catch (Throwable) {
+            return $this->renderDirectly($e);
+        }
     }
 
     public function renderForConsole($output, Throwable $e): void
