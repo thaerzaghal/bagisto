@@ -1,9 +1,15 @@
 name: Build & Publish Docker Image
 
 # ============================================================================
-# Triggers a multi-arch (amd64 + arm64) build of the production Bagisto images
-# whenever a `v*` tag is pushed (the same tag convention used for Bagisto
-# releases), and also supports manual dispatch for ad-hoc rebuilds.
+# Builds a multi-arch (amd64 + arm64) build of the production Bagisto images.
+#
+# TASK-MVP-011: manual-only (`workflow_dispatch`), deliberately - this
+# project no longer runs any GitHub-hosted Action automatically (local-first
+# testing/build policy, see docs/implementation/ci-testing.md and
+# DECISION_LOG.md). Previously also triggered automatically on a `v*` tag
+# push; that automatic trigger is removed here, not the workflow itself -
+# run it manually from the Actions tab ("Run workflow") whenever a real
+# image publish is actually wanted.
 #
 # Three web-server variants are built from docker/production/:
 #   - nginx     → :<version>-nginx     (also the unsuffixed :<version> / :latest)
@@ -16,9 +22,6 @@ name: Build & Publish Docker Image
 # ============================================================================
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       bagisto_version:

@@ -13,7 +13,8 @@ name: Platform Tests
 # inputs, no job selection) rather than adding a chooser between full/smoke/
 # both - both jobs always run together on dispatch; there was no clear
 # benefit found to selective triggering for a manually-invoked workflow.
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read

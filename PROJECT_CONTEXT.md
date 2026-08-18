@@ -66,7 +66,7 @@ Platform\Admin -> Tenancy, Plans, Subscriptions, Billing (reads their central mo
 - Plans/entitlements/product-limit enforcement (Admin UI path AND bulk CSV import path both enforced).
 - Subscriptions (Trialing/Active/Canceled/Expired, manual transitions only, no scheduler).
 - Billing: Stripe sandbox checkout + webhook, signature-verified, idempotent, wired to `SubscriptionLifecycle::changePlan()`.
-- CI: `pest_tests.yml` (upstream Bagisto lane, automatic) + `platform_tests.yml` (Platform suite + production-config smoke lane, manual `workflow_dispatch` to conserve GitHub Free-tier minutes).
+- CI: all `.github/workflows/*.yml` are `workflow_dispatch`-only (TASK-MVP-011) - local-first testing is the official policy, GitHub is source/history storage only. See "Local Development / Testing" below.
 
 **Built since the section above was last accurate (TASK-MVP-001/002/003/004A)**:
 - **Merchant self-service signup — DONE (TASK-MVP-001).** `packages/Platform/Signup`: public `/join` form creates a Tenant + Domain, triggers `TenantProvisioner`, gives the merchant a real self-chosen owner email/password (never a hardcoded seeded default), with signed-URL retry authorization for provisioning failures. R19 resolved at this exact input boundary (slug allowlist regex).
@@ -108,7 +108,7 @@ Platform\Admin -> Tenancy, Plans, Subscriptions, Billing (reads their central mo
 - Bootstrap a fresh environment: `platform:mark-installed` → `platform:migrate:central` → `platform:plans:seed` → (optionally) `tenant:provision {id} --domain=...`. **Never** `bagisto:install` against the real central DB.
 - Full Platform suite: `vendor/bin/pest tests/Feature/Platform` (273 tests as of the last completed task, ~13 minutes).
 - Production-config smoke lane (`SESSION_DRIVER=database`/`CACHE_STORE=redis`/`QUEUE_CONNECTION=redis`/`RESPONSE_CACHE_ENABLED=false` — catches bugs the default test config masks, e.g. R29/R33): `vendor/bin/pest -c phpunit.smoke.xml`.
-- CI: `.github/workflows/pest_tests.yml` (automatic, upstream Bagisto lane, currently failing on a genuine pre-existing incompatibility between `bagisto:install` and this project's central-migration guard — documented, not fixed, deliberately). `.github/workflows/platform_tests.yml` (manual `workflow_dispatch` only, two jobs: full Platform suite + production-config smoke).
+- **GitHub Actions: local-first testing policy (TASK-MVP-011).** Every workflow under `.github/workflows/` (`pest_tests.yml`, `pint_tests.yml`, `admin_playwright_tests.yml`, `shop_playwright_tests.yml`, `translation_tests.yml`, `platform_tests.yml`, `docker_publish.yml`) is `workflow_dispatch`-only - none run automatically on `push`, `pull_request`, or (for `docker_publish.yml`, previously) a `v*` tag push. GitHub is source/history storage; local execution is the real verification loop; production is verified only through safe, non-destructive checks (`platform:production:check`, safe HTTP smoke, backup/R2/SMTP health) - never the full Pest or Playwright suite. Every workflow file/job/service/command is otherwise unchanged and remains runnable on demand from the Actions tab. Full local command reference, the three testing levels, and known local-test caveats: `docs/implementation/ci-testing.md`; decision rationale: `DECISION_LOG.md` C83.
 - No passwords/secrets in this file or in git; `.env` stays untracked (verify with `git ls-files .env` — must be empty).
 
 # Current Git Baseline

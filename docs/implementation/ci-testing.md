@@ -1,63 +1,197 @@
-# Platform CI & Testing (TASK-ARCH-017, revised TASK-ARCH-017A)
+# Platform CI & Testing (TASK-ARCH-017, revised TASK-ARCH-017A, TASK-MVP-011)
 
 Real implementation record - not a Phase 0 speculative sketch. See
 [testing-strategy.md](testing-strategy.md) for the original Phase 0 plan;
 this document describes what actually exists.
 
-## Local testing is primary
+## Local-first testing is the official policy (TASK-MVP-011)
 
-**Local Pest runs are the normal development workflow - not GitHub Actions.**
-Run these after every meaningful change, exactly like every other Pest suite
-in this repository:
+**Every workflow under `.github/workflows/` is `workflow_dispatch`-only -
+none of them run automatically on `push` or `pull_request` any more.**
+GitHub is source/history storage for this project; local execution is the
+actual verification loop, and production is verified only through safe,
+non-destructive checks (`platform:production:check`, real but narrow HTTP
+smoke, backup/R2/SMTP health - see "Three local test levels" below). This
+was a deliberate product decision (DECISION_LOG.md), not an oversight -
+GitHub Free-tier Actions minutes are limited, this fork already had known
+upstream CI incompatibilities (see "Upstream Bagisto CI incompatibility"
+below), and heavy Playwright sharding (10 shards x 2 suites) on every single
+push was never buying anything a local run doesn't already prove faster.
+Every workflow file is kept, unchanged apart from its trigger stanza, and
+remains runnable on demand from the Actions tab ("Run workflow") whenever a
+deliberate milestone check or an actual Docker image publish is wanted.
 
-```bash
-# A. Full Platform integration suite (tests/Feature/Platform), default config
-# (CACHE_STORE=array, QUEUE_CONNECTION=sync, SESSION_DRIVER=array - matching
-# every other Pest suite in this repository):
-vendor/bin/pest tests/Feature/Platform
-# (equivalently: vendor/bin/pest --testsuite="Platform Feature Test")
+## Official local development flow
 
-# B. Production-configuration smoke lane - MUST use -c, never run the directory
-# alone (see phpunit.smoke.xml's own docblock for why):
-vendor/bin/pest -c phpunit.smoke.xml
-
-# Confirm suite registration/discovery:
-vendor/bin/pest --list-tests --testsuite="Platform Feature Test" | head
+```
+AI/developer
+    -> focused local tests (Level 1)
+    -> Pest / Pint / Playwright as relevant
+    -> commit
+    -> push
+    -> NO automatic GitHub Actions run
 ```
 
-`tests/Feature/Platform` is registered as a real named PHPUnit/Pest suite
-(`phpunit.xml`, "Platform Feature Test") - a bare `vendor/bin/pest` with no
-`--testsuite` filter now includes it by default.
+Production is never used as a test runner - never the full Pest suite,
+never the full Playwright suite, never a destructive/CI-style provisioning
+test. Production verification stays limited to `platform:production:check`,
+safe HTTP smoke checks, the exact real flow under verification, and
+backup/R2/SMTP health (Level 3 below).
 
-**C. GitHub Actions is an additional, manual milestone-verification layer**
-(`.github/workflows/platform_tests.yml`, `workflow_dispatch` only - see
-"Why the Platform lanes are manual, not automatic" below) - not required
-after every local commit, and not a substitute for running A/B locally
-first.
+## Local developer commands
 
-## CI lanes
+**Platform Pest - full suite** (default config: `CACHE_STORE=array`,
+`QUEUE_CONNECTION=sync`, `SESSION_DRIVER=array` - matching every other Pest
+suite in this repository):
+```bash
+vendor/bin/pest tests/Feature/Platform
+# (equivalently: vendor/bin/pest --testsuite="Platform Feature Test")
+```
+
+**Platform Pest - one focused file** (the normal day-to-day command while
+implementing/fixing something specific):
+```bash
+vendor/bin/pest tests/Feature/Platform/<File>.php
+```
+
+**Platform Pest - production-config smoke lane.** `-c phpunit.smoke.xml` is
+mandatory - **do NOT replace it with a bare `tests/Feature/PlatformSmoke`
+directory invocation**, which would silently run under `phpunit.xml`'s
+array/sync/array test defaults instead of the real production-intended
+values this lane exists to prove (see that file's own docblock, and the
+R29/R33 masking mechanism this exact mistake would reproduce):
+```bash
+vendor/bin/pest -c phpunit.smoke.xml
+```
+
+**Upstream Webkul Pest suites** (the suites Lane A's workflow used to run
+automatically - documented here exactly as currently known, not as a
+recommended everyday command; see the known incompatibility note below
+before relying on this locally):
+```bash
+vendor/bin/pest --parallel --colors=always \
+  --testsuite="Admin Feature Test,Core Unit Test,Customer Unit Test,DataGrid Unit Test,EUWithdrawal Feature Test,Installer Feature Test,PayGlocal Unit Test,PayGlocal Feature Test,PayU Unit Test,PayU Feature Test,Razorpay Unit Test,Razorpay Feature Test,Shop Feature Test,Stripe Unit Test,Stripe Feature Test"
+```
+This requires `php artisan bagisto:install --no-interaction` first, exactly
+as `pest_tests.yml` does it - **and that step has a known, pre-existing,
+not-fixed-here incompatibility with this fork** (`bagisto:install`'s
+internal `migrate` step is rejected by
+`Platform\Tenancy\Listeners\PreventCentralMigrationOfTenantSchema`, R30 -
+see "Upstream Bagisto CI incompatibility" below for the full mechanism).
+Confirm your own local database is genuinely disposable before attempting
+this - never point it at `bagisto_central`.
+
+**Pint - whole repository** (matches what `pint_tests.yml` itself runs):
+```bash
+vendor/bin/pint --test
+```
+
+**Pint - day-to-day Platform scope:**
+```bash
+vendor/bin/pint --test packages/Platform
+```
+
+**Admin Playwright** (from `admin_playwright_tests.yml`'s own steps -
+requires a running `php artisan serve` at the given `BASE_URL` first;
+10-shard splitting is a CI-only optimization, not needed on one machine -
+prefer a focused `--grep`/single spec file during normal task development,
+and reserve the full suite for when Admin UI materially changed):
+```bash
+cd packages/Webkul/Admin
+npm install
+npx playwright install --with-deps chromium   # first time only
+BASE_URL=http://127.0.0.1:8000 npx playwright test --config=tests/e2e-pw/playwright.config.ts
+```
+
+**Shop Playwright** (identical shape, `packages/Webkul/Shop`):
+```bash
+cd packages/Webkul/Shop
+npm install
+npx playwright install --with-deps chromium   # first time only
+BASE_URL=http://127.0.0.1:8000 npx playwright test --config=tests/e2e-pw/playwright.config.ts
+```
+
+**Translation check** (exactly what `translation_tests.yml` runs):
+```bash
+php artisan bagisto:translations:check
+```
+
+**Production readiness** (Level 3 only - never a substitute for the above
+during development):
+```bash
+php artisan platform:production:check
+```
+
+## Three local test levels
+
+**Level 1 - task focused** (normal development): the Pest file(s) you
+touched plus any directly-related regression file, Pint on the touched
+file/package, and a focused Playwright spec only if the change is UI-facing.
+
+**Level 2 - milestone regression** (before a significant push/deploy): the
+broader `tests/Feature/Platform` suite, a broader/whole-repo Pint pass, the
+relevant Admin/Shop Playwright suite if UI changed, and the
+production-config smoke lane when the change touches session/cache/queue
+behavior.
+
+**Level 3 - production verification** (after deployment only):
+`platform:production:check`, safe real HTTP smoke of the exact flow under
+verification, and backup/R2/mail health. Never the full Pest suite, never
+the full Playwright suite, never a destructive CI-style test, against
+production.
+
+## Known local/test-environment caveats (not fixed here)
+
+- **R49** - long-running real-worker/queue-draining test flakiness tied to
+  total single-process suite DURATION (19+ minutes), not to any specific
+  test's logic. See RISK_REGISTER.md.
+- **`AdminDashboardNonReadyTenantTimingTest.php`** uses real-subprocess
+  `php artisan serve` processes and cleans up its own disposable tenant
+  databases in `beforeEach`/`afterEach` (`DROP DATABASE IF EXISTS`) - if the
+  local server process or Docker container is killed abruptly mid-run
+  (matching R61's own documented "`Kernel::terminate()` can kill a
+  single-threaded `serve` process" mechanism), that cleanup may not
+  complete, potentially leaving an orphaned tenant schema behind locally.
+  Re-run `cleanupR58TimingTenant()`'s own logic (or just drop the
+  `tenant-r58-timing-*` databases manually) if this is ever suspected.
+- **`bagisto:install` vs. `PreventCentralMigrationOfTenantSchema` (R30)** -
+  see "Upstream Bagisto CI incompatibility" below.
+- Upstream Bagisto's own Pest/Playwright CI assumptions (installer-driven
+  bootstrap, no tenancy) do not necessarily hold for this multi-tenant
+  fork - treat Lane A/Playwright local runs as informational, not as a
+  required gate, until/unless that incompatibility is deliberately
+  addressed in its own task.
+
+## CI lanes (workflow inventory - all now manual-only, TASK-MVP-011)
 
 Three lanes across two workflow files, all additive - no pre-existing
-Bagisto/Webkul CI coverage was removed:
+Bagisto/Webkul CI coverage was removed, only its automatic trigger:
 
 | Lane | Workflow | Job | Trigger | What it proves |
 |---|---|---|---|---|
-| A. Existing Bagisto tests | `.github/workflows/pest_tests.yml` | `pest_tests` | automatic, every push/PR (unchanged from upstream) | Unmodified upstream Webkul package suites (Admin/Core/Customer/DataGrid/EUWithdrawal/Installer/PayGlocal/PayU/Razorpay/Shop/Stripe) - unchanged behavior, only its CI database was renamed (see "Safe database naming" below) |
+| A. Existing Bagisto tests | `.github/workflows/pest_tests.yml` | `pest_tests` | manual (`workflow_dispatch`) | Unmodified upstream Webkul package suites (Admin/Core/Customer/DataGrid/EUWithdrawal/Installer/PayGlocal/PayU/Razorpay/Shop/Stripe) - unchanged behavior, only its CI database was renamed (see "Safe database naming" below) |
 | B. Platform full integration suite | `.github/workflows/platform_tests.yml` | `platform_tests` | manual (`workflow_dispatch`) | The full `tests/Feature/Platform` suite, default test config |
 | C. Production-config smoke | `.github/workflows/platform_tests.yml` | `platform_smoke_tests` | manual (`workflow_dispatch`) | A small, focused suite proving the golden path survives under this project's real, production-intended config |
 
-## Why the Platform lanes are manual, not automatic (TASK-ARCH-017A)
+`admin_playwright_tests.yml`, `shop_playwright_tests.yml`, and
+`translation_tests.yml` are likewise manual-only now. `docker_publish.yml`
+lost its automatic `v*`-tag-push trigger and is manual-only too - a real
+image publish now requires deliberately running it from the Actions tab.
+
+## Why the Platform lanes were already manual (TASK-ARCH-017A), and why every other lane joined them (TASK-MVP-011)
 
 This project is on a **GitHub Free plan**. Lanes B and C are both real-MySQL
 (Lane C also real-Redis), multi-minute jobs - running them automatically on
 every ordinary push/pull request would consume Actions minutes for no
 benefit over running the same suites locally (which is faster feedback
-anyway, and is already required before pushing). `platform_tests.yml` uses
-`on: workflow_dispatch` - triggered manually from the Actions tab, intended
-for deliberate milestone verification (before a release, after a
-significant Platform change), not as a per-commit gate. Lane A is
-unaffected and keeps its original automatic `[push, pull_request]` trigger,
-unchanged from upstream Bagisto.
+anyway, and is already required before pushing). `platform_tests.yml` was
+already `workflow_dispatch`-only for this exact reason. TASK-MVP-011
+extended the identical reasoning to every remaining lane: Lane A and both
+Playwright workflows ran `[push, pull_request]` automatically, consuming
+real minutes on every single push (Playwright alone is 10 parallel shards x
+2 suites = 20 jobs per push) for coverage this fork's own local commands
+already provide faster feedback on - and, per the incompatibility below,
+for coverage that currently fails for a known, unrelated reason anyway.
 
 ## MySQL/Redis dependencies
 
@@ -234,9 +368,10 @@ application code:
 production-config smoke lane exists (Lane C above), runs the real
 production-intended values, passes locally (9/9), and can be run in GitHub
 Actions on demand via `workflow_dispatch`. Not claimed as continuous
-per-push CI coverage - Lanes B/C were deliberately made manual-only to
-conserve GitHub Free-tier Actions minutes (see "Why the Platform lanes are
-manual, not automatic" above). See RISK_REGISTER.md.
+per-push CI coverage - every lane, not only B/C, is now deliberately
+manual-only to conserve GitHub Free-tier Actions minutes (see "Why the
+Platform lanes were already manual (TASK-ARCH-017A), and why every other
+lane joined them (TASK-MVP-011)" above). See RISK_REGISTER.md.
 
 ## CI gap status
 
