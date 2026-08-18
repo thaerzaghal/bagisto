@@ -6,8 +6,12 @@ namespace Platform\Backup\Providers;
 
 use Illuminate\Support\ServiceProvider;
 use Platform\Backup\Console\Commands\CleanupBackups;
+use Platform\Backup\Console\Commands\CleanupOffsiteBackups;
 use Platform\Backup\Console\Commands\RunBackup;
+use Platform\Backup\Console\Commands\SyncOffsiteBackup;
+use Platform\Backup\Contracts\OffsiteBackupDestination;
 use Platform\Backup\Services\BackupPathGuard;
+use Platform\Backup\Services\S3CompatibleOffsiteDestination;
 
 /**
  * TASK-MVP-003A. Registers `platform:backup:run`/`platform:backup:cleanup`
@@ -29,6 +33,15 @@ class BackupServiceProvider extends ServiceProvider
         // so a runtime config() override (as this package's own tests do)
         // is correctly picked up.
         $this->app->bind(BackupPathGuard::class, fn () => BackupPathGuard::fromConfig());
+
+        // TASK-MVP-005. Bound to the interface, not a concrete class,
+        // specifically so tests can swap in a fake destination without
+        // touching real network/Cloudflare infrastructure (this project's
+        // one accepted exception to "no mocking of this project's own
+        // infrastructure" - R2/S3 is EXTERNAL infrastructure, the same
+        // category the Stripe SDK's own official test seam already covers
+        // for billing).
+        $this->app->bind(OffsiteBackupDestination::class, S3CompatibleOffsiteDestination::class);
     }
 
     public function boot(): void
@@ -37,6 +50,8 @@ class BackupServiceProvider extends ServiceProvider
             $this->commands([
                 RunBackup::class,
                 CleanupBackups::class,
+                SyncOffsiteBackup::class,
+                CleanupOffsiteBackups::class,
             ]);
         }
     }

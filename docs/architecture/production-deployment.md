@@ -109,11 +109,17 @@ runbook: [docs/implementation/backup-and-recovery.md](../implementation/backup-a
 `php artisan platform:production:check` includes a `Backups` row reporting
 the newest successful backup's age.
 
-**Known limitation, stated plainly there too**: the backup destination
-(`/opt/estore/backups/`) is still on the SAME physical server as the live
-application/database - a real first layer, not true off-server disaster-recovery
-readiness. Copying/syncing it to an off-server destination remains open,
-deliberately out of TASK-MVP-003A's own scope.
+**Off-server sync - IMPLEMENTED (TASK-MVP-005).** `platform:backup:sync-offsite`
+copies every finalized local backup to an independent, S3-compatible offsite
+destination (Cloudflare R2 as the current provider - see
+[docs/implementation/backup-and-recovery.md](../implementation/backup-and-recovery.md)
+"Offsite sync" for the full architecture, configuration, verification, and
+retention design). The local destination (`/opt/estore/backups/`) remains
+the SAME physical server as the live application/database by design - it is
+still the first, primary restore source; the offsite copy is disaster-recovery
+protection against loss of that server specifically, not a replacement for
+it. `php artisan platform:production:check` includes an `Offsite Backup` row
+alongside the existing `Backups` row.
 
 ## O. First-production bootstrap sequence
 

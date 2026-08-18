@@ -123,16 +123,269 @@ never nested inside either (INCIDENT-001's own lesson applied deliberately -
 a backup destination inside the same mutable tree it protects is not a real
 backup).
 
-**Known limitation, stated plainly**: `/opt/estore/backups/` is still on the
-SAME physical server/disk as the live application and database. This is a
-real, deliberate first layer, not a claim of true disaster-recovery
-readiness - if this server's disk fails, the backups fail with it. Copying/
-syncing this directory to an off-server destination (S3, another host, etc.)
-is the natural next step and was explicitly kept out of this task's scope
-(task section 21) - the directory structure here is deliberately simple
-(plain timestamped subdirectories) specifically so a future `rsync`/`aws s3
-sync ... /opt/estore/backups/` needs no changes to this implementation at
-all to start working.
+**Formerly a known limitation, now addressed (TASK-MVP-005)**: `/opt/estore/backups/`
+is still on the SAME physical server/disk as the live application and
+database - the LOCAL backup destination was always meant to be a first
+layer, not full disaster-recovery readiness on its own. `platform:backup:sync-offsite`
+(below) copies every already-finalized local backup to an independent,
+off-server destination, closing this gap without changing anything about
+the local backup itself.
+
+## Offsite sync (TASK-MVP-005)
+
+**Local backups remain the first restore source.** The offsite copy exists
+purely as disaster-recovery protection against loss of the server/disk the
+local backups themselves live on (this server's disk failing, the whole VPS
+being lost, etc.) - it is never read from in the normal course of operating
+this platform.
+
+### Architecture
+
+```
+platform:backup:run                    (unchanged - see "Architecture" above)
+   |
+   v  (only after local finalization - never re-runs any dump)
+platform:backup:sync-offsite [<timestamp>]
+   |
+   v
+Platform\Backup\Services\OffsiteSyncRunner
+   |
+   v
+Platform\Backup\Contracts\OffsiteBackupDestination   <- the one seam
+   |
+   v
+Platform\Backup\Services\S3CompatibleOffsiteDestination
+   |  (Laravel's own Storage::build(['driver' => 's3', ...]) -
+   |   league/flysystem-aws-s3-v3, no custom HTTP/SigV4 code)
+   v
+<BACKUP_OFFSITE_PREFIX>/daily/<timestamp>/
+   |-- central.sql.gz
+   |-- tenants/<tenant-id>.sql.gz
+   |-- tenant-files/<tenant-id>-app.tar.gz / -private.tar.gz
+   |-- manifest.json
+```
+
+`OffsiteBackupDestination` is a small, provider-neutral contract
+(`upload`/`download`/`exists`/`size`/`delete`/`listKeysWithPrefix`) -
+deliberately not an S3 SDK wrapper. **Cloudflare R2 is this project's
+CURRENT choice of S3-compatible provider, not an architectural
+commitment**: R2/AWS S3/Wasabi/Backblaze B2's S3-compatible endpoint/MinIO
+all speak the same S3 API, so `S3CompatibleOffsiteDestination` already
+covers every one of them - switching providers later is a `.env` change
+(`BACKUP_OFFSITE_ENDPOINT`/`BACKUP_OFFSITE_REGION`/credentials), never a
+code change. A genuinely different kind of destination (e.g. rsync to a
+second physical host) would only need a second class implementing the same
+contract; nothing in `OffsiteSyncRunner`/the console commands would change.
+
+### Commands
+
+```bash
+php artisan platform:backup:sync-offsite [<timestamp>]
+php artisan platform:backup:cleanup-offsite [--dry-run]
+```
+
+`sync-offsite` defaults to the newest finalized local backup when no
+timestamp is given (the normal cron usage); a specific timestamp can be
+passed to retry a particular backup's offsite sync independently.
+**Deliberately two commands, not one automatic step tacked onto
+`platform:backup:run`** (task section 10) - a finalized local backup is the
+ONLY input `OffsiteSyncRunner` ever reads, and it never re-runs any
+mysqldump/tar, so offsite sync can be retried as many times as needed
+(e.g. after a transient network failure) without touching the local backup
+at all.
+
+### Configuration
+
+`config('platform-backup.offsite.*')` / `.env`:
+
+| Key | Purpose |
+|---|---|
+| `BACKUP_OFFSITE_ENABLED` | `false` by default - `sync-offsite` reports DISABLED and exits successfully (not an error) until this is `true`. |
+| `BACKUP_OFFSITE_DRIVER` | `s3` (generic - see above). |
+| `BACKUP_OFFSITE_BUCKET` / `_ENDPOINT` / `_REGION` / `_ACCESS_KEY` / `_SECRET_KEY` | The real R2 (or other S3-compatible provider) credentials - **never committed**, production sets these directly in its own untracked `.env` only. |
+| `BACKUP_OFFSITE_PREFIX` | Object key prefix every offsite backup is written under (default `estore-backups`) - lets a bucket be safely shared with unrelated content; also the safety boundary `OffsiteKeyGuard` enforces before any remote delete. |
+| `BACKUP_OFFSITE_USE_PATH_STYLE` | `true` by default - R2 (and most non-AWS S3-compatible providers) require path-style bucket addressing. |
+| `BACKUP_OFFSITE_RETENTION_DAYS` | `30` by default - deliberately longer than local (`BACKUP_RETENTION_DAYS`, `7`); storage cost is not a practical constraint at this project's current backup size (well under 1 MB total). |
+
+### Idempotency
+
+The remote path is fully deterministic from the local backup's own
+timestamp name (`<prefix>/daily/<timestamp>/...`). Before uploading each
+file, `OffsiteSyncRunner` checks whether an object of the same name and
+size already exists remotely - if so, it is skipped, not re-uploaded.
+Running `sync-offsite` twice in a row (or retrying after a partial failure)
+never creates a duplicate or inconsistent remote copy.
+
+### Integrity verification
+
+Upload success alone (an API call returning without error) is **not**
+treated as proof of a correct remote copy. For every uploaded file,
+`OffsiteSyncRunner`:
+
+1. Confirms the remote object's size matches the local file's size.
+2. Downloads the object back to a disposable temp file and recomputes its
+   SHA-256, comparing it against the LOCAL manifest's own already-proven
+   checksum (never a provider's ETag - S3-compatible ETags are not
+   guaranteed to be a SHA-256, or even a hash of the plaintext content at
+   all for multipart uploads).
+
+This full round-trip is practical because this project's actual backup size
+is currently well under 1 MB total (see the task's own final report for the
+real numbers) - a genuinely large future backup would need a sampling
+strategy instead, not attempted here since it isn't yet needed.
+
+### Failure semantics
+
+**A local backup succeeding and an offsite sync succeeding are two
+completely independent outcomes**, reported separately:
+
+- `platform:backup:run` failing does not affect any previous offsite sync.
+- `platform:backup:sync-offsite` failing (a network error, an upload
+  failure, a checksum mismatch) never touches, corrupts, or "half-deletes"
+  the local backup it was syncing - the local `<timestamp>/` directory
+  `BackupRunner` already finalized is read-only from `OffsiteSyncRunner`'s
+  perspective.
+- The result of every sync attempt (success, failure with a reason, or
+  disabled) is written to a SIBLING file next to the local backup directory
+  - `<BACKUP_ROOT>/daily/<timestamp>.offsite-status.json` - never inside the
+    finalized backup directory itself (the same "never mutate a finalized
+    backup" discipline `BackupRunner`'s `.failed`/`.in-progress` suffixes
+    already establish for local backups).
+- `platform:backup:sync-offsite` exits non-zero on failure, non-zero being
+  the same cron/systemd-timer failure-detection signal `platform:backup:run`
+  already uses - offsite failure is never silently swallowed.
+
+### Remote retention
+
+`platform:backup:cleanup-offsite` reuses the exact same selection algorithm
+as local cleanup (`Platform\Backup\Services\BackupRetention` - "delete
+anything older than N days, except the single newest, ever") against
+`BACKUP_OFFSITE_RETENTION_DAYS` instead of `BACKUP_RETENTION_DAYS` -
+deliberately not a more complex grandfather-father-son policy (task section
+12), since the simple rule is already the right amount of complexity for
+this project's actual scale.
+
+### Delete safety
+
+`Platform\Backup\Services\OffsiteKeyGuard` is the remote-storage equivalent
+of `BackupPathGuard` - the ONE place that decides whether a remote object
+key is safe to delete, in the exact `<prefix>/daily/<timestamp>/...` shape
+this package actually writes. `CleanupOffsiteBackups` asserts every single
+key through this guard immediately before deleting it; a failed check
+aborts the whole command rather than being silently skipped. The bare
+prefix, `<prefix>/daily` with no timestamp, and anything outside the
+configured prefix are all rejected - "delete everything under the prefix"
+is never a single operation this guard permits. See
+`tests/Feature/Platform/OffsiteKeyGuardTest.php` for the full test matrix.
+
+### Production-check integration
+
+`php artisan platform:production:check` includes an **Offsite Backup** row,
+read purely from the LOCAL `<timestamp>.offsite-status.json` sibling file
+`OffsiteSyncRunner` already writes on every attempt - never a live call to
+the offsite provider (task section 14: no expensive provider calls on every
+execution). Reports disabled/INFO, WARN (never synced yet, last attempt
+failed, or stale - more than 48h since the last success), or PASS with the
+newest successful sync's age and object count.
+
+### Security
+
+- Bucket/credentials are configured via `.env` only, never committed, never
+  printed/logged by any command in this package.
+- The R2 bucket (or equivalent) MUST be private - not publicly browsable,
+  no public bucket policy, no signed public URLs ever generated by this
+  package (nothing in `Platform\Backup` ever calls a public-URL-generating
+  method).
+- Backup contents (database dumps, tenant file archives) contain real
+  customer/merchant PII, identical to what the local backup already
+  contains - see "Security / permissions" above for what's already true of
+  the local copy.
+
+### Encryption at rest
+
+**Provider-side encryption at rest is relied upon, not re-implemented
+client-side.** Cloudflare R2 encrypts all stored objects at rest by
+default, at the storage layer, with no configuration needed - the same is
+true of AWS S3 and most other S3-compatible providers. This project does
+NOT add its own client-side backup encryption on top of that (task section
+19) - evaluated and deliberately deferred: it would add real key-management
+complexity (where does the encryption key live, how is it rotated, how is
+it itself backed up) for a 1-5 merchant pilot where the local backup
+already carries the identical PII exposure and already relies on
+provider/filesystem-level protection rather than client-side encryption.
+**Revisit before scaling** - this is an explicit, recorded decision (see
+DECISION_LOG.md), not an oversight.
+
+### Schedule
+
+Added to the existing root crontab (unchanged Let's Encrypt jobs at
+02:31/10:37, unchanged local backup/cleanup at 03:15/03:45):
+
+```cron
+# TASK-MVP-005 - Platform offsite backup sync (03:30, after the local backup above finishes) and offsite cleanup (03:50)
+30 3 * * * cd /opt/estore/app && /usr/bin/docker compose -f docker-compose.production.yml exec -T app php artisan platform:backup:sync-offsite >> /opt/estore/backups/backup-run.log 2>&1
+50 3 * * * cd /opt/estore/app && /usr/bin/docker compose -f docker-compose.production.yml exec -T app php artisan platform:backup:cleanup-offsite >> /opt/estore/backups/backup-run.log 2>&1
+```
+
+`sync-offsite` runs 15 minutes after the local backup (03:15) to give it
+time to finish; `cleanup-offsite` runs after local cleanup (03:45), at
+03:50. Safe to have installed before real R2 credentials exist - both
+commands report DISABLED and exit successfully until `BACKUP_OFFSITE_ENABLED=true`
+is set.
+
+### Offsite restore procedure
+
+```
+1. Download the desired <timestamp> from the offsite destination
+   (a disposable local directory - never a live restore target directly)
+2. Verify manifest.json / checksums (php artisan platform:backup:sync-offsite
+   already proved this for the copy that was uploaded; re-verify after
+   download if restoring from a truly independent recovery scenario)
+3. Follow the exact same "Disaster recovery runbook" steps below, using the
+   downloaded artifacts in place of a locally-copied backup directory -
+   nothing else in that runbook changes.
+```
+
+### Real verification result (2026-08-18, TASK-MVP-005)
+
+Proven live against the real pilot server and a real Cloudflare R2 bucket -
+not just the automated fake-destination test suite:
+
+- A real, scheduler-produced finalized backup (`2026-08-18_031502`) was
+  synced to R2: 5 objects, ~753 KB total.
+- Independently re-listed directly from R2 (not the sync command's own
+  self-report): exactly those 5 objects, all under the configured prefix,
+  nothing else.
+- Every checksummed object round-trip-verified (download + SHA-256
+  recompute against the local manifest) - not an ETag substitute.
+- Re-syncing the same backup a second time was idempotent: still exactly 5
+  objects, 1 distinct backup, no duplicate/re-upload.
+- An unauthenticated GET against a real object in the bucket returned
+  `400` (rejected) - the bucket is not publicly readable.
+- A full restore drill succeeded: downloaded fresh from R2, checksums
+  re-verified again independently, central dump restored into a disposable
+  `bagisto_probe_restore_central` database (1 tenant/`pilot-smoke`/`ready`,
+  3 plans, 1 subscription), tenant dump restored into a disposable
+  `bagisto_probe_restore_tenant` database (138 tables, 1 product, 2 orders,
+  1 admin), tenant files extracted with a representative file's checksum
+  verified. All disposable targets were cleaned up; the real local and R2
+  backups were untouched throughout.
+- `php artisan platform:production:check` reports both `Backups` and
+  `Offsite Backup` PASS.
+
+See RISK_REGISTER.md R64 (now CLOSED) and the task's own final report for
+the complete evidence chain.
+
+### Known limitations (offsite)
+
+- **No automated, unattended remote restore-verification job** - proven
+  manually (see the task's own final report for the real R2 sync +
+  restore-drill result), matching the exact same limitation already stated
+  for local restores above.
+- **Single offsite provider/region** - one R2 bucket, not multi-region or
+  multi-provider replication. Acceptable for a 1-5 merchant pilot; revisit
+  if/when a stronger RPO/RTO requirement emerges.
+- **No client-side encryption** - see "Encryption at rest" above.
 
 ## Security / permissions
 
@@ -403,12 +656,16 @@ lists elsewhere, not new tooling.
 
 ## Known limitations
 
-- **Same-server backup destination** (see "Destination" above) - the single
-  biggest real gap versus true disaster-recovery readiness. Off-server sync
-  is the natural next step, deliberately not built here.
-- **No backup encryption at rest** - `/opt/estore/backups/` relies entirely
-  on filesystem permissions (`750`/`0640`), not encryption. Acceptable for a
-  1-5 merchant pilot on a single trusted server; revisit before scaling.
+- **Same-server LOCAL backup destination remains true and is by design** -
+  `/opt/estore/backups/` is still the first, primary restore source (see
+  "Destination" above); it was never meant to stop being local. The
+  disaster-recovery gap this used to represent is now addressed by offsite
+  sync - see "Offsite sync" above and its own "Known limitations (offsite)".
+- **No backup encryption at rest for the LOCAL copy** - `/opt/estore/backups/`
+  relies entirely on filesystem permissions (`750`/`0640`), not encryption.
+  Acceptable for a 1-5 merchant pilot on a single trusted server; revisit
+  before scaling. The offsite copy relies on the provider's own storage-layer
+  encryption at rest instead - see "Encryption at rest" above.
 - **No automated restore-verification job** - restores were proven manually,
   twice (local + real pilot server), not wired into a recurring, unattended
   "restore and diff" check. Task section 20 explicitly recommends "periodic

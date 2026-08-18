@@ -49,6 +49,7 @@ class ProductionReadinessCheck extends Command
             $this->checkStripe(),
             $this->checkMail(),
             $this->checkBackupHealth(),
+            $this->checkOffsiteBackupHealth(),
         ];
 
         $this->table(['Check', 'Status', 'Detail'], $rows);
@@ -259,6 +260,58 @@ class ProductionReadinessCheck extends Command
         }
 
         return $this->resultPass('Backups', "newest successful backup: [{$newest}] ({$ageHours}h ago, {$manifest['tenant_count']} tenant(s)).");
+    }
+
+    /**
+     * TASK-MVP-005. Deliberately a LIGHTWEIGHT, purely LOCAL metadata check
+     * (task section 14: "Do NOT make production:check ... perform expensive
+     * provider calls every execution") - reads the newest
+     * `<timestamp>.offsite-status.json` sibling file `Platform\Backup\
+     * Services\OffsiteSyncRunner` already writes on every sync attempt,
+     * never a live call to the offsite provider. Same
+     * cross-package-config-only pattern as `checkBackupHealth()` (no
+     * dependency on `Platform\Backup`'s own classes, plain `json_decode`).
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkOffsiteBackupHealth(): array
+    {
+        if (! config('platform-backup.offsite.enabled')) {
+            return $this->resultInfo('Offsite Backup', 'disabled (BACKUP_OFFSITE_ENABLED is not true) - local backups only. See docs/implementation/backup-and-recovery.md "Offsite sync".');
+        }
+
+        $dailyRoot = rtrim((string) config('platform-backup.root'), '/').'/daily';
+
+        if (! is_dir($dailyRoot)) {
+            return $this->resultWarn('Offsite Backup', 'enabled, but no local backup directory exists yet - platform:backup:run has never succeeded here.');
+        }
+
+        $statusFiles = array_values(array_filter(
+            scandir($dailyRoot) ?: [],
+            fn (string $name): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}_\d{6}\.offsite-status\.json$/', $name)
+        ));
+
+        if ($statusFiles === []) {
+            return $this->resultWarn('Offsite Backup', 'enabled, but platform:backup:sync-offsite has never run here yet.');
+        }
+
+        sort($statusFiles);
+        $newestFile = $statusFiles[array_key_last($statusFiles)];
+        $status = json_decode((string) file_get_contents("{$dailyRoot}/{$newestFile}"), true);
+
+        if (! is_array($status) || ($status['status'] ?? null) !== 'success') {
+            $backupName = str_replace('.offsite-status.json', '', $newestFile);
+
+            return $this->resultWarn('Offsite Backup', "newest offsite sync attempt [{$backupName}] did not succeed (status: ".($status['status'] ?? 'unknown').') - inspect it manually.');
+        }
+
+        $ageHours = (int) round(now()->diffInHours($status['finished_at'] ?? $status['synced_at'], true));
+
+        if ($ageHours > 48) {
+            return $this->resultWarn('Offsite Backup', "newest successful offsite sync is from [{$status['timestamp']}], {$ageHours}h ago - STALE (expected at most ~24h for a daily schedule). Check the offsite sync schedule/cron.");
+        }
+
+        return $this->resultPass('Offsite Backup', "newest successful offsite sync: [{$status['timestamp']}] ({$ageHours}h ago, {$status['object_count']} object(s) at {$status['remote_path']}).");
     }
 
     /** @return array{0: string, 1: string, 2: string} */
