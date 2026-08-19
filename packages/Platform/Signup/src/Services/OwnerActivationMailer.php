@@ -75,6 +75,26 @@ use Throwable;
  * duration of this one method call, inside the one HTTP request that
  * invoked it, and is unconditionally restored before that request's
  * response is even built.
+ *
+ * TASK-MVP-012 (DECISION_LOG.md): the identical class of bug R69 already
+ * fixed for the URL root applies equally to LOCALE - `$tenant->run()`
+ * only runs the configured tenancy bootstrappers (database/cache/
+ * filesystem); it has no effect on `app()->getLocale()` at all. Since
+ * this method always runs from a CENTRAL Platform Admin HTTP request,
+ * `Webkul\Admin\Mail\Admin\ResetPasswordNotification::toMail()` (called
+ * deep inside `Password::broker('admins')->sendResetLink()`) would
+ * otherwise render using whatever the shared, process-wide
+ * `config('app.locale')` is - never the tenant's own Arabic-first
+ * default - meaning a brand-new Arabic-first merchant's very first email
+ * would arrive in English. Fixed with the exact same save/set/restore
+ * idiom as the URL-root fix immediately above: `app()->getLocale()` is
+ * captured BEFORE forcing, the tenant's own default locale
+ * (`core()->getCurrentChannel()->default_locale->code` - the same source
+ * of truth `Platform\Tenancy\Http\Middleware\SetTenantAdminLocale`
+ * already uses for Admin rendering) is applied only if resolvable, and
+ * the original locale is unconditionally restored in the same `finally`
+ * block that already restores the URL root - both together, always, on
+ * success or failure alike.
  */
 class OwnerActivationMailer
 {
@@ -85,9 +105,16 @@ class OwnerActivationMailer
 
         return (bool) $tenant->run(function () use ($tenant, $domain, $scheme) {
             $originalRoot = url('/');
+            $originalLocale = app()->getLocale();
 
             try {
                 URL::forceRootUrl("{$scheme}://{$domain}");
+
+                $tenantLocale = core()->getCurrentChannel()?->default_locale?->code;
+
+                if ($tenantLocale) {
+                    app()->setLocale($tenantLocale);
+                }
 
                 $status = Password::broker('admins')->sendResetLink(['email' => $tenant->owner_email]);
 
@@ -98,6 +125,7 @@ class OwnerActivationMailer
                 return false;
             } finally {
                 URL::forceRootUrl($originalRoot);
+                app()->setLocale($originalLocale);
             }
         });
     }

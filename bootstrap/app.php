@@ -10,6 +10,7 @@ use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Foundation\Http\Middleware\PreventRequestsDuringMaintenance;
 use Illuminate\Http\Request;
 use Platform\Signup\Http\Middleware\FlagFirstLoginWelcome;
+use Platform\Tenancy\Http\Middleware\SetTenantAdminLocale;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
 use Platform\Tenancy\Support\EnvList;
 use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
@@ -138,9 +139,16 @@ return Application::configure(basePath: dirname(__DIR__))
          * for reasons only partially isolated - RISK_REGISTER.md R50).
          * Runs on every Shop/tenant-Admin request - never Platform
          * Admin, which uses the entirely separate 'platform' group.
+         *
+         * TASK-MVP-012: `Platform\Tenancy\Http\Middleware\
+         * SetTenantAdminLocale` is appended alongside it for the
+         * identical reason (no `packages/Webkul/Admin` route-group
+         * extension point exists to hook a locale middleware onto
+         * directly) - see that class's own docblock for the full design.
          */
         $middleware->appendToGroup('web', [
             FlagFirstLoginWelcome::class,
+            SetTenantAdminLocale::class,
         ]);
 
         $middleware->validateCsrfTokens(except: [

@@ -85,8 +85,19 @@ return [
     | from top to bottom and for country based locales the simple one
     | is used first. So "es" will be checked before "es_MX".
     |
+    | TASK-MVP-012 (DECISION_LOG.md): changed from 'en' to 'ar' - Arabic
+    | is now the primary/default merchant and storefront language, so
+    | Category/CMS translation fallback aligns with that decision rather
+    | than defaulting to English. Only affects requests where the
+    | REQUESTED locale's own translated field is genuinely empty (see
+    | Astrotomic\Translatable's own fallback mechanism) - a category with
+    | real Arabic content, browsed in Arabic, never needs this fallback
+    | at all. Safe for existing English-only tenants: their `locales`
+    | table has no 'ar' row/content to "wrongly" fall back to, so this is
+    | a functional no-op for them - confirmed by regression coverage.
+    |
     */
-    'fallback_locale' => 'en',
+    'fallback_locale' => 'ar',
 
     /*
     |--------------------------------------------------------------------------

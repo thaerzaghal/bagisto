@@ -73,6 +73,8 @@ class TenantProvisioner
             $this->ensureFilesystemPrepared($tenant);
             $this->ensureMigrated($tenant);
             $this->ensureSeeded($tenant);
+            $this->ensureArabicLocaleSeeded($tenant);
+            $this->ensureArabicThemeContentSeeded($tenant);
             $this->ensureChannelHostnameCorrect($tenant);
             $this->ensureInitialSubscriptionStarted($tenant);
             $this->ensureOwnerAdminSeeded($tenant, $ownerAdmin);
@@ -236,6 +238,172 @@ class TenantProvisioner
             }
 
             Artisan::call('db:seed', ['--force' => true]);
+        });
+    }
+
+    /**
+     * TASK-MVP-012 (DECISION_LOG.md). Arabic-first default for every newly
+     * provisioned tenant, product decision: `ar` becomes the tenant's
+     * default channel locale, `en` remains available as a secondary
+     * locale. Runs AFTER ensureSeeded() (so the `en`-only baseline
+     * `Webkul\Installer\Database\Seeders\Core\LocalesTableSeeder`/
+     * `ChannelTableSeeder` already produce - see this class's own audit
+     * notes in DECISION_LOG.md - is guaranteed to already exist) and
+     * BEFORE ensureChannelHostnameCorrect(), which also writes to
+     * `channels.id = 1` and is the established precedent this method's
+     * own raw-`DB::table()` style deliberately mirrors, for the identical
+     * reason that method already gives (no `packages/Webkul` Eloquent
+     * dependency needed for a narrow, known-shape write).
+     *
+     * WHY NOT `LocalesTableSeeder`/`ChannelTableSeeder` THEMSELVES: both
+     * are Bagisto's own, called via the single, parameterless
+     * `Artisan::call('db:seed', ...)` in ensureSeeded() - passing
+     * `allowed_locales => ['ar', 'en']` there would need a custom
+     * DatabaseSeeder wiring (RISK_REGISTER.md R11/ADR-001 already
+     * rejected using the Installer command itself for the identical
+     * "don't fork Bagisto's own seeding pipeline" reason), and
+     * `LocalesTableSeeder::run()` unconditionally `DELETE`s and re-
+     * inserts every `locales`/`channels` row from scratch, which is
+     * unsafe to call a second time against an already-partially-
+     * provisioned tenant on a retried attempt. A small, purely additive,
+     * idempotent step here - never touching what `db:seed` already
+     * correctly produced - is both smaller and safer.
+     *
+     * IDEMPOTENT / RETRY-SAFE, matching every other step in this class:
+     * the `ar` locale row is inserted only if a `code = 'ar'` row does
+     * not already exist (`insertGetId` is never called twice for the
+     * same tenant); `channel_locales` attachment uses `insertOrIgnore`
+     * (safe against the composite primary key already existing from a
+     * prior partial run); the final `UPDATE default_locale_id` is a
+     * plain idempotent write, identical in shape to
+     * ensureChannelHostnameCorrect()'s own `hostname` update.
+     *
+     * EXISTING-TENANT SAFETY: this method is only ever reachable through
+     * `provision()`, which is a documented no-op the instant
+     * `$tenant->status === TenantStatus::Ready` (see that method's own
+     * top). Every tenant already in production
+     * (`pilot-smoke`/`test1`/`thaertest`/`mvp007-check`) is already
+     * `Ready`, so this method can never execute against them under
+     * normal operation - no extra "is this a new tenant" flag or guard
+     * was needed on top of that pre-existing boundary. The one accepted
+     * edge case (explicitly approved, not an oversight): a tenant stuck
+     * `Pending`/`Failed` that never successfully completed its FIRST
+     * provisioning attempt, if retried via Platform Admin's existing
+     * retry action, WILL receive Arabic-first defaults - consistent with
+     * "new tenant" framing, since such a tenant was never actually live
+     * for any real merchant.
+     */
+    protected function ensureArabicLocaleSeeded(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('locales') || ! Schema::hasTable('channels') || ! Schema::hasTable('channel_locales')) {
+                throw new RuntimeException(
+                    'Cannot seed Arabic locale: locales/channels/channel_locales tables do not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $englishLocaleId = DB::table('locales')->where('code', 'en')->value('id');
+
+            if (! $englishLocaleId) {
+                throw new RuntimeException(
+                    'Cannot seed Arabic locale: no English locale row exists yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $arabicLocaleId = DB::table('locales')->where('code', 'ar')->value('id');
+
+            if (! $arabicLocaleId) {
+                $arabicLocaleId = DB::table('locales')->insertGetId([
+                    'code' => 'ar',
+                    'name' => 'Arabic',
+                    'direction' => 'rtl',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+
+            DB::table('channel_locales')->insertOrIgnore([
+                ['channel_id' => 1, 'locale_id' => $arabicLocaleId],
+                ['channel_id' => 1, 'locale_id' => $englishLocaleId],
+            ]);
+
+            DB::table('channels')->where('id', 1)->update(['default_locale_id' => $arabicLocaleId]);
+        });
+    }
+
+    /**
+     * TASK-MVP-012 (DECISION_LOG.md). Found live, empirically, while
+     * verifying the storefront actually renders under Arabic (not merely
+     * that the database configuration was correct) - a real, previously-
+     * unknown consequence of Arabic becoming the default channel locale,
+     * fixed within this same task rather than silently worked around.
+     *
+     * ROOT CAUSE: `theme_customizations` (the homepage's slider/services/
+     * footer/etc. SECTIONS - id/type/name/sort_order, locale-independent)
+     * is seeded once, but `theme_customization_translations` (the actual
+     * CONTENT per section - a `json` `options` column, e.g. the services
+     * list `packages/Webkul/Shop/src/Resources/views/components/layouts/
+     * services.blade.php` reads) is seeded by `Webkul\Installer\Database\
+     * Seeders\Shop\ThemeCustomizationTableSeeder` inside the exact same
+     * `foreach ($locales as $locale)` loop as `LocalesTableSeeder` -
+     * meaning it ALSO only ever gets an `en` row per section, for the
+     * identical "ensureSeeded() calls db:seed with no allowed_locales
+     * parameter" reason `ensureArabicLocaleSeeded()` above already
+     * documents. Once the channel's default locale becomes `ar`, any
+     * Blade view that unconditionally reads that section's `options` for
+     * the ACTIVE locale (several do, `services.blade.php` among them)
+     * finds no row at all and throws "Trying to access array offset on
+     * null" - a real storefront homepage crash, not merely missing text.
+     *
+     * FIX: clone each section's already-seeded `en` `options` JSON
+     * verbatim into a new `ar` row - the SAME established principle as
+     * `ensureArabicLocaleSeeded()` (duplicate existing seeded content
+     * under the new locale key, never invent new copy) - deliberately
+     * NOT a translation of the actual marketing content (slider titles,
+     * service descriptions): that is real merchant-facing copy this task
+     * has no business writing on a merchant's behalf, exactly like a
+     * freshly seeded `en` tenant today ships with generic placeholder
+     * content the merchant is expected to customize. This only ensures
+     * Bagisto's own existing view code has SOME row to read under the
+     * tenant's own new default locale, so the homepage renders instead
+     * of crashing - a correctness fix, not a content/translation task.
+     *
+     * IDEMPOTENT: only inserts an `ar` row for a `theme_customization_id`
+     * that doesn't already have one - safe to call again on a retried
+     * attempt without duplicating rows. No unique DB constraint exists on
+     * `(theme_customization_id, locale)` (confirmed by reading that
+     * table's own migration), so this method's own `exists()` guard is
+     * the only protection - acceptable given, like every other step in
+     * this class, provisioning a single tenant is never run concurrently
+     * with itself.
+     */
+    protected function ensureArabicThemeContentSeeded(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('theme_customization_translations')) {
+                throw new RuntimeException(
+                    'Cannot seed Arabic theme content: theme_customization_translations table does not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $englishRows = DB::table('theme_customization_translations')->where('locale', 'en')->get();
+
+            foreach ($englishRows as $row) {
+                $alreadyHasArabic = DB::table('theme_customization_translations')
+                    ->where('theme_customization_id', $row->theme_customization_id)
+                    ->where('locale', 'ar')
+                    ->exists();
+
+                if ($alreadyHasArabic) {
+                    continue;
+                }
+
+                DB::table('theme_customization_translations')->insert([
+                    'theme_customization_id' => $row->theme_customization_id,
+                    'locale' => 'ar',
+                    'options' => $row->options,
+                ]);
+            }
         });
     }
 
