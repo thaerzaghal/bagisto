@@ -9,12 +9,58 @@
         <table>
             <tr><th>Tenant ID</th><td>{{ $tenant->getTenantKey() }}</td></tr>
             <tr><th>Status</th><td><span class="status status-{{ $tenant->status->value }}">{{ $tenant->status->value }}</span></td></tr>
-            <tr><th>Domains</th><td>{{ $tenant->domains->pluck('domain')->join(', ') ?: '—' }}</td></tr>
+            <tr><th>Owner</th><td>{{ $tenant->owner_name ?: '—' }}</td></tr>
+            <tr><th>Owner email</th><td>{{ $tenant->owner_email ?: '—' }}</td></tr>
+            <tr>
+                <th>Domains</th>
+                <td>
+                    @forelse ($tenant->domains as $domain)
+                        <div>
+                            {{ $domain->domain }}
+                            &mdash;
+                            <a href="{{ request()->isSecure() ? 'https' : 'http' }}://{{ $domain->domain }}" target="_blank" rel="noopener">Storefront</a>
+                            &middot;
+                            <a href="{{ request()->isSecure() ? 'https' : 'http' }}://{{ $domain->domain }}/{{ config('app.admin_url') }}/login" target="_blank" rel="noopener">Merchant Admin</a>
+                        </div>
+                    @empty
+                        &mdash;
+                    @endforelse
+                </td>
+            </tr>
             <tr><th>Plan</th><td>{{ $plan?->name ?? '—' }}{{ $plan && ! $plan->is_active ? ' (inactive)' : '' }}</td></tr>
             <tr><th>Last error</th><td>{{ $tenant->last_error ?: '—' }}</td></tr>
             <tr><th>Created at</th><td>{{ $tenant->created_at }}</td></tr>
             <tr><th>Updated at</th><td>{{ $tenant->updated_at }}</td></tr>
         </table>
+    </div>
+
+    {{--
+        TASK-MVP-015. Derived-only onboarding readiness summary - see
+        Platform\Admin\Http\Controllers\TenantController::
+        onboardingReadiness()'s own docblock. Deliberately narrow: a null
+        status means "not applicable / not yet knowable", never rendered
+        as either pass or fail.
+    --}}
+    <div class="card" style="margin-top: 1.5rem; max-width: 560px;">
+        <h2 style="margin-top: 0;">Onboarding Status</h2>
+        <table>
+            @foreach ($readiness as $check)
+                <tr>
+                    <th>{{ $check['label'] }}</th>
+                    <td>
+                        @if ($check['status'] === true)
+                            <span class="status status-ready">Yes</span>
+                        @elseif ($check['status'] === false)
+                            <span class="status status-suspended">No</span>
+                        @else
+                            <span class="status status-pending">N/A</span>
+                        @endif
+                        <br><small>{{ $check['detail'] }}</small>
+                    </td>
+                </tr>
+            @endforeach
+        </table>
+        <p><small>This summary is derived live from existing tenant/plan/subscription/locale state - it is never stored, and it deliberately does not cover payment, shipping, tax, catalog, checkout, or merchant-activation readiness. See <code>docs/operations/merchant-onboarding-checklist.md</code> for the full manual checklist.</small></p>
     </div>
 
     <p style="margin-top: 1.5rem;">

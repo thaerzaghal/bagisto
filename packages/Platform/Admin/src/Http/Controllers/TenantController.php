@@ -6,6 +6,7 @@ namespace Platform\Admin\Http\Controllers;
 
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
@@ -68,6 +69,10 @@ use Throwable;
  * owner-activation email can be retried WITHOUT re-provisioning (see
  * `Platform\Signup\Services\OwnerActivationMailer`'s own docblock for the
  * full credential-handling design).
+ *
+ * TASK-MVP-015: `show()` also renders a small, DERIVED-ONLY onboarding
+ * readiness summary - see `onboardingReadiness()`'s own docblock. No new
+ * persistence was added anywhere in this class for it.
  */
 class TenantController
 {
@@ -163,11 +168,12 @@ class TenantController
     public function show(Tenant $tenant): View
     {
         $plan = $tenant->plan_id ? Plan::find($tenant->plan_id) : null;
+        $subscription = Subscription::currentFor($tenant);
 
         return view('platform::tenants.show', [
             'tenant' => $tenant->load('domains'),
             'plan' => $plan,
-            'subscription' => Subscription::currentFor($tenant),
+            'subscription' => $subscription,
             // TASK-ARCH-015: only ACTIVE plans are offered for manual
             // (re)assignment - see TenantPlanAssignment's own "assignable"
             // rule. The tenant's CURRENT plan is included even if it has
@@ -188,7 +194,105 @@ class TenantController
                 ->latest('id')
                 ->limit(10)
                 ->get(),
+            'readiness' => $this->onboardingReadiness($tenant, $plan, $subscription),
         ]);
+    }
+
+    /**
+     * TASK-MVP-015. A small, DERIVED-ONLY readiness summary - no new
+     * persistence, no stored checklist state. Every entry here is computed
+     * fresh from data this method already has authoritative access to
+     * (this tenant's own central `tenants`/`plans`/`subscriptions` rows,
+     * plus - for the Arabic-locale check only - this ONE tenant's own
+     * database via `$tenant->run()`, the same scoping pattern every other
+     * tenant-context read in this codebase already uses; never a
+     * cross-tenant read, never a central commerce table).
+     *
+     * DELIBERATELY NARROW (explicit product-owner instruction): this must
+     * stay truthful and conservative. It answers only questions this
+     * class can actually verify from real state - it does NOT claim to
+     * know whether payment/shipping/tax/catalog is configured, whether
+     * checkout works, or whether the merchant has actually activated their
+     * account. Those remain manual, human-verified steps recorded in
+     * docs/operations/merchant-onboarding-checklist.md, not faked here.
+     *
+     * @return array<int, array{label: string, status: bool|null, detail: string}>
+     */
+    protected function onboardingReadiness(Tenant $tenant, ?Plan $plan, ?Subscription $subscription): array
+    {
+        return [
+            [
+                'label' => 'Tenant provisioned',
+                'status' => $tenant->status === TenantStatus::Ready,
+                'detail' => "Status: {$tenant->status->value}".($tenant->last_error ? " ({$tenant->last_error})" : ''),
+            ],
+            [
+                'label' => 'Domain configured',
+                'status' => $tenant->domains->isNotEmpty(),
+                'detail' => $tenant->domains->isNotEmpty()
+                    ? $tenant->domains->pluck('domain')->join(', ')
+                    : 'No domain recorded for this tenant.',
+            ],
+            [
+                'label' => 'Owner identity recorded',
+                'status' => filled($tenant->owner_name) && filled($tenant->owner_email),
+                'detail' => filled($tenant->owner_email) ? $tenant->owner_email : 'No owner name/email recorded.',
+            ],
+            [
+                'label' => 'Plan & subscription consistent',
+                'status' => $plan !== null
+                    && $subscription !== null
+                    && $subscription->plan_id === $tenant->plan_id
+                    && in_array($subscription->status, [SubscriptionStatus::Trialing, SubscriptionStatus::Active], true),
+                'detail' => $subscription
+                    ? "Subscription [{$subscription->status->value}] on plan [{$subscription->plan->name}]."
+                    : 'No subscription exists yet.',
+            ],
+            [
+                'label' => 'Arabic locale configured',
+                'status' => $this->arabicLocaleReadiness($tenant),
+                'detail' => $tenant->status === TenantStatus::Ready
+                    ? 'Checked live against this tenant\'s own locales/channel configuration.'
+                    : 'Not checked - tenant is not yet Ready (no physical database to inspect).',
+            ],
+        ];
+    }
+
+    /**
+     * TASK-MVP-015. Returns null (not applicable / not yet knowable) for
+     * any tenant that isn't Ready - there is no physical tenant database
+     * to safely inspect before that. For a Ready tenant, mirrors exactly
+     * what `Platform\Tenancy\Services\TenantProvisioner::
+     * ensureArabicLocaleSeeded()` itself establishes: an `ar` AND an `en`
+     * locale row both exist and are attached to channel 1 via
+     * `channel_locales`, and channel 1's `default_locale_id` points at
+     * `ar`. Runs entirely inside `$tenant->run()` - this tenant's own
+     * database connection only, never any other tenant's, never a central
+     * table.
+     */
+    protected function arabicLocaleReadiness(Tenant $tenant): ?bool
+    {
+        if ($tenant->status !== TenantStatus::Ready) {
+            return null;
+        }
+
+        return (bool) $tenant->run(function () {
+            $arabicId = DB::table('locales')->where('code', 'ar')->value('id');
+            $englishId = DB::table('locales')->where('code', 'en')->value('id');
+
+            if (! $arabicId || ! $englishId) {
+                return false;
+            }
+
+            $bothAttached = DB::table('channel_locales')
+                ->where('channel_id', 1)
+                ->whereIn('locale_id', [$arabicId, $englishId])
+                ->count() === 2;
+
+            $defaultIsArabic = DB::table('channels')->where('id', 1)->value('default_locale_id') === $arabicId;
+
+            return $bothAttached && $defaultIsArabic;
+        });
     }
 
     /**
