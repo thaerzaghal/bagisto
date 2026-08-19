@@ -1,6 +1,6 @@
 # Localization / Arabic-First Merchant & Storefront Experience
 
-## Product decision — IMPLEMENTED (TASK-MVP-012)
+## Product decision — IMPLEMENTED, DEPLOYED, PRODUCTION-VERIFIED (TASK-MVP-012, deployed/verified by TASK-MVP-014)
 
 **Merchant and shopper experiences are Arabic-first; the internal Platform Admin operator panel stays English.** The initial target market is Arabic-speaking merchants/customers (Palestine and the wider Arabic-speaking region). Every newly provisioned tenant gets Arabic (`ar`, RTL) as its default storefront and Merchant Admin language automatically, with English preserved as an available secondary locale — no manual switching required. This is a deliberate product decision (see `DECISION_LOG.md` C84), not a translation patch.
 
@@ -50,6 +50,22 @@ The identical class of bug R69 already fixed for the URL root applies equally to
 ## Existing-tenant policy
 
 New tenants get Arabic-first defaults automatically. **Existing Ready tenants (`pilot-smoke`/`test1`/`thaertest`/`mvp007-check`) are never auto-migrated** — protected by `provision()`'s own no-op-when-`Ready` guard, proven by a dedicated regression test that simulates a pre-task `en`-only Ready tenant and confirms zero change after a re-provision call. The one deliberate, accepted exception: a `Pending`/`Failed` tenant that never successfully completed its *first* provisioning attempt **will** receive Arabic-first defaults if retried via Platform Admin's existing retry action — consistent with "new tenant" framing (such a tenant was never actually live for a real merchant), not a violation of "existing tenant" policy. A future, separate, explicitly-approved migration command would be needed only if an already-live tenant is later chosen to convert to Arabic — not built here.
+
+## Verified live in production (TASK-MVP-014)
+
+Deployed to the real Oracle Cloud server (`APP_COMMIT c2a0773d9c25d3df76ddb2cc7bad3ea08416a575`) and verified end-to-end against one real production tenant, `arabic-mvp-check`, created through the genuine Platform Admin "Create Merchant" HTTP flow (never `/join`, never a direct service call, never raw SQL). All of the following were confirmed live, not simulated:
+
+- **`[ar, en]`** — the tenant's `locales` table has exactly these two rows, `ar.direction=rtl`, `channel_locales` attaches both.
+- **Arabic default** — `channels.default_locale_id` points at `ar`.
+- **RTL** — every rendered page (Admin and storefront alike) emits `dir="rtl"` when serving the Arabic default.
+- **Arabic Admin** — Merchant Admin login, dashboard, products, categories, orders, and settings pages all rendered `lang="ar" dir="rtl"`, with genuine Arabic UI text (e.g. the dashboard title rendered as "لوحة التحكم"). Human-confirmed at login; independently re-verified across the remaining pages via a temporary, disposable Admin account created and deleted for this purpose (the real owner's own credentials were never used for this part).
+- **Arabic storefront** — homepage, category, product, and cart pages all rendered 200 with `lang="ar" dir="rtl"`.
+- **English secondary locale** — `?locale=en` genuinely switches rendering to `lang="en" dir="ltr"` without altering the tenant's own persisted Arabic default.
+- **Arabic catalog content** — a real category (`فئة تجريبية عربية`) and a real product (`منتج تجريبي عربي`, SKU `arabic-test-product`) were created through the real Admin UI with zero English content required or auto-created, and rendered correctly on both Admin and storefront.
+- **Correct activation/reset host** — the real activation email's reset link pointed at `arabic-mvp-check.app.technify.dev`, human-confirmed.
+- **Isolation of pre-existing English tenants** — `pilot-smoke`, `test1`, `thaertest`, and `mvp007-check` were all re-verified completely unchanged (status, plan, locale rows, default locale, product counts) both before and after every step of this verification.
+
+R71 (theme-content per-locale seeding gap) and R72 (`LimitExceededException` 422-rendering regression, fixed by TASK-MVP-013) were both confirmed closed with live evidence as part of the same production pass — see RISK_REGISTER.md for the full record, including R72's live 422 + zero-persistence proof performed safely on `arabic-mvp-check` alone via a dedicated, disposable plan.
 
 ## Explicit non-goals (this task)
 
