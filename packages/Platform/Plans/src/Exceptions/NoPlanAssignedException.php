@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Platform\Plans\Exceptions;
 
+use Platform\Plans\Exceptions\Concerns\RendersAsEntitlementFailure;
 use RuntimeException;
 
 /**
@@ -14,7 +15,14 @@ use RuntimeException;
  * tenant that hasn't finished provisioning (TenantProvisioner assigns the
  * default plan as a provisioning step) or was created bypassing
  * TenantProvisioner entirely.
+ *
+ * `Platform\Plans\Http\Controllers\Admin\MyPlanController::index()`
+ * still catches this locally and never lets it reach HTTP rendering at
+ * all - `RendersAsEntitlementFailure`'s `render()` (TASK-MVP-013) is only
+ * ever invoked for a caller that lets this propagate uncaught, unchanged
+ * from before that trait existed.
  */
 class NoPlanAssignedException extends RuntimeException implements EntitlementException
 {
+    use RendersAsEntitlementFailure;
 }
