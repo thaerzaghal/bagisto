@@ -84,14 +84,20 @@ during store configuration if actually needed.
 merchant's behalf before handoff) — all via the tenant's own Admin
 **Configure** settings, already fully supported by stock Bagisto:
 
-- [ ] Store logo and favicon (Configure → General → Design)
+- [ ] `[Automated]` Store logo and favicon are NOT set automatically — still
+      needs `[Merchant]`/`[Operator]` action (Configure → General → Design)
 - [ ] Store contact email / notification settings (Configure → Emails)
-- [ ] Currency (Configure → Currencies) — default is USD; change if the
-      merchant needs a different currency for this store
-- [ ] Address requirements (Configure → Customers → Address) — country/
-      state/postcode requirements are per-channel toggles; adjust if a
-      required field doesn't fit the merchant's country
-- [ ] Shipping origin address (Configure → Sales → Shipping)
+- [ ] `[Automated]` Currency — ILS (₪), set automatically at provisioning
+      (TASK-MVP-016). No secondary currency is enabled; changing the base
+      currency after real products/orders exist is risky (existing prices
+      would be silently reinterpreted under the new currency) — do not
+      change it on a live store.
+- [ ] `[Automated]` Address requirements — country defaults to Palestine,
+      postcode requirement is off, state (governorate) stays required with
+      the real 16 Palestinian governorates already seeded and selectable.
+      `[Verify]` this still matches what the merchant actually needs.
+- [ ] Shipping origin address (Configure → Sales → Shipping) — still
+      `[Merchant]`/`[Operator]` input, not automated
 - [ ] Theme/homepage content — provisioning clones the English placeholder
       content into Arabic verbatim (untranslated) so the page doesn't crash;
       **it is not real Arabic marketing copy**. Replace it with the
@@ -117,18 +123,24 @@ correct name/price/image render.
 
 ## 7. Verify shipping/payment
 
-`[Merchant]`/`[Operator]` via Configure → Sales:
-
-- [ ] At least one shipping method enabled (Free Shipping or Flat Rate are
-      built in and require no external account)
-- [ ] At least one payment method enabled. **Cash on Delivery and Money
-      Transfer are already built into Bagisto and configurable per store** —
-      relevant options while a real non-Stripe Palestine payment gateway
-      remains a separate, deferred decision. Stripe requires real API keys
-      the operator does not have for merchants by default.
-- [ ] Tax configuration reviewed (Configure → Sales → Taxes) — do not assume
-      a rate; use whatever the merchant/operator has actually confirmed
-      applies. No tax rule is set automatically by provisioning.
+- [ ] `[Automated]` **Cash on Delivery is enabled by default** (TASK-MVP-016)
+      — `[Verify]` it appears and is selectable at checkout, no configuration
+      needed.
+- [ ] `[Automated]` **Money Transfer is present but inactive** — `[Merchant]`/
+      `[Operator]` must enable it AND enter the merchant's real bank/account
+      details (Configure → Sales → Payment Methods → Money Transfer) before
+      it's usable. Never invent placeholder bank details.
+- [ ] `[Merchant]`/`[Operator]` At least one shipping method enabled (Free
+      Shipping or Flat Rate — built in, require no external account). The
+      delivery fee itself is never pre-filled — enter the real amount.
+- [ ] Stripe requires real API keys the operator does not have for merchants
+      by default — not configured, not expected for a first Palestinian
+      merchant.
+- [ ] `[Automated]` Tax — **intentionally left unconfigured** (zero
+      categories/rates seeded, by design). Do not assume a rate; use
+      whatever the merchant/operator has actually confirmed applies with
+      real legal/accounting input (Configure → Sales → Taxes). The store
+      runs correctly tax-free until you do.
 
 `[Verify]` The configured payment/shipping combination is actually
 selectable at checkout (see Section 8).

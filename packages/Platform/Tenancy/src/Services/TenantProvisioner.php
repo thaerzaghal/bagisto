@@ -13,6 +13,7 @@ use Platform\Plans\Models\Plan;
 use Platform\Subscriptions\Services\SubscriptionLifecycle;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
+use Platform\Tenancy\Support\PalestineGovernorates;
 use RuntimeException;
 use Throwable;
 
@@ -75,6 +76,11 @@ class TenantProvisioner
             $this->ensureSeeded($tenant);
             $this->ensureArabicLocaleSeeded($tenant);
             $this->ensureArabicThemeContentSeeded($tenant);
+            $this->ensurePalestineCurrencySeeded($tenant);
+            $this->ensurePalestineGovernoratesSeeded($tenant);
+            $this->ensurePalestineTimezoneSet($tenant);
+            $this->ensurePalestineAddressDefaultsSeeded($tenant);
+            $this->ensurePalestinePaymentDefaultsSeeded($tenant);
             $this->ensureChannelHostnameCorrect($tenant);
             $this->ensureInitialSubscriptionStarted($tenant);
             $this->ensureOwnerAdminSeeded($tenant, $ownerAdmin);
@@ -404,6 +410,386 @@ class TenantProvisioner
                     'options' => $row->options,
                 ]);
             }
+        });
+    }
+
+    /**
+     * TASK-MVP-016 (RISK_REGISTER.md / DECISION_LOG.md). Palestine-first
+     * default: replaces the tenant's single seeded currency (always
+     * `config('app.currency')`, USD by default - see CurrencyTableSeeder,
+     * the same "ensureSeeded() calls db:seed with no parameters" reason
+     * `ensureArabicLocaleSeeded()` already documents) with ILS.
+     *
+     * DELIBERATELY ILS-ONLY, not a second (USD) currency: enabling a
+     * secondary currency without a matching `currency_exchange_rates` row
+     * would make `Core::convertPrice()` silently return the UNCONVERTED
+     * number for that currency (confirmed by reading its source - it
+     * falls back to the raw amount when no exchange rate exists) - a real
+     * risk of a shopper seeing "100" and not knowing whether that means
+     * ILS or USD. Dual-currency support is explicitly deferred until the
+     * multi-tenant correctness of Bagisto's exchange-rate mechanism
+     * (`exchange-rate:update`, scheduled per `general.exchange_rates.
+     * schedule.*` config) is verified - see docs/architecture/
+     * palestine-readiness.md.
+     *
+     * WHY AN UPDATE-IN-PLACE, NOT A NEW CURRENCY ROW: every fresh tenant
+     * has exactly one `currencies` row (id from `CurrencyTableSeeder`)
+     * and `channels.base_currency_id`/`channel_currencies` already point
+     * at it - correcting that one row's `code`/`name`/`symbol`/`decimal`
+     * needs no FK rewiring at all, the same "correct in place" principle
+     * `ensureChannelHostnameCorrect()` already establishes for `hostname`.
+     * `symbol`/`decimal` are hardcoded here (not imported from
+     * `Webkul\Core\Helpers\SupportedCurrencies`, which already fully
+     * supports ILS - confirmed during this task's own audit) precisely
+     * BECAUSE `Platform\Tenancy` does not depend on a specific `Webkul\*`
+     * class - that is a narrow, deliberate exception this file's own
+     * `ensureOwnerAdminSeeded()` docblock already documents belongs only
+     * to `Platform\Enforcement` (DECISION_LOG C23). A raw `DB::table()`
+     * write to a Webkul-owned TABLE (already this whole class's
+     * established pattern) is not the same coupling as importing a
+     * Webkul PHP class.
+     *
+     * IDEMPOTENT: no-ops if the currency is already ILS (covers both a
+     * retried attempt and this method running twice).
+     *
+     * EXISTING-TENANT SAFETY: only reachable through `provision()`, which
+     * is a no-op the instant `$tenant->status === TenantStatus::Ready` -
+     * identical protection to every other TASK-MVP-012/016 addition.
+     */
+    protected function ensurePalestineCurrencySeeded(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('currencies')) {
+                throw new RuntimeException(
+                    'Cannot seed Palestine currency: currencies table does not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $currency = DB::table('currencies')->orderBy('id')->first();
+
+            if (! $currency || $currency->code === 'ILS') {
+                return;
+            }
+
+            DB::table('currencies')->where('id', $currency->id)->update([
+                'code' => 'ILS',
+                'name' => trans('installer::app.seeders.core.currencies.ILS', [], 'en'),
+                // ₪ / 2 decimal places - matches Webkul\Core\Helpers\
+                // SupportedCurrencies::ALL['ILS'] exactly; duplicated
+                // here rather than imported, see this method's own
+                // docblock for why.
+                'symbol' => '₪',
+                'decimal' => 2,
+                'updated_at' => now(),
+            ]);
+        });
+    }
+
+    /**
+     * TASK-MVP-016. Seeds the 16 governorates of the State of Palestine
+     * into `country_states`/`country_state_translations` - Platform-owned
+     * DATA, zero `packages/Webkul` changes (mirrors the exact principle
+     * `ensureArabicLocaleSeeded()` already established: these are plain
+     * seeded tables, not code).
+     *
+     * AUTHORITATIVE SOURCE: the 16 governorates of the State of Palestine
+     * (11 West Bank + 5 Gaza Strip) and their ISO 3166-2:PS subdivision
+     * codes, per established public administrative-geography knowledge
+     * (matches the Palestinian Central Bureau of Statistics' own
+     * governorate list and the ISO 3166-2:PS standard). This was applied
+     * from that knowledge, not fetched from a live registry during this
+     * task - if these codes are ever relied on for an external
+     * integration that requires certified ISO compliance, cross-check
+     * against the official ISO 3166 registry first. The English/Arabic
+     * NAMES are not in question (standard, uncontroversial); the exact
+     * 3-letter CODE suffixes carry that one disclosed caveat. See
+     * docs/architecture/palestine-readiness.md for the full list as
+     * committed.
+     *
+     * CODE FORMAT: a bare suffix (e.g. `JEN`), matching this project's
+     * own existing `states.json` convention for every other country
+     * (e.g. `code: 'AL'` for Alabama, not `US-AL`) - not a new format.
+     *
+     * IMPORTANT, DISCLOSED TRADE-OFF: `Webkul\Core\Core::
+     * groupedStatesByCountries()` - which powers the REAL storefront
+     * checkout state dropdown (`shop.api.core.states`) - reads
+     * `country_states.default_name` via a raw `DB::table(...)->get()`,
+     * confirmed by direct source reading to bypass the `CountryState`
+     * Eloquent model (and therefore its Astrotomic Translatable
+     * mechanism) ENTIRELY. This means the live checkout dropdown will
+     * always show whichever single language is in the base
+     * `default_name` column, regardless of the shopper's active locale.
+     * Since Arabic is this tenant type's PRIMARY locale (English is
+     * explicitly secondary - DECISION_LOG.md C84), the base column is
+     * set to the ARABIC name - the opposite of every other country in
+     * `states.json`, which stores English in that column, because for
+     * every other country English generally IS the primary experience.
+     * `country_state_translations` is ALSO populated (`ar` + `en` rows)
+     * for schema completeness and any future code path that does honor
+     * the Eloquent model - but will NOT change what the live storefront
+     * dropdown shows today. Residual, disclosed limitation: a shopper who
+     * switches to the secondary `en` locale will still see Arabic
+     * governorate names in the state dropdown - fixing that needs a
+     * `packages/Webkul` change to `groupedStatesByCountries()` itself,
+     * out of scope here (see docs/architecture/palestine-readiness.md
+     * "Deferred").
+     *
+     * IDEMPOTENT: guarded per-governorate by `code`, safe to call again
+     * on a retried tenant without duplicating rows.
+     */
+    protected function ensurePalestineGovernoratesSeeded(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('country_states') || ! Schema::hasTable('country_state_translations')) {
+                throw new RuntimeException(
+                    'Cannot seed Palestine governorates: country_states/country_state_translations tables do not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $countryId = DB::table('countries')->where('code', 'PS')->value('id');
+
+            if (! $countryId) {
+                throw new RuntimeException(
+                    'Cannot seed Palestine governorates: no PS row exists in countries (seeding step did not complete as expected).'
+                );
+            }
+
+            foreach (PalestineGovernorates::ALL as $code => $names) {
+                $existingId = DB::table('country_states')
+                    ->where('country_code', 'PS')
+                    ->where('code', $code)
+                    ->value('id');
+
+                if ($existingId) {
+                    continue;
+                }
+
+                $stateId = DB::table('country_states')->insertGetId([
+                    'country_id' => $countryId,
+                    'country_code' => 'PS',
+                    'code' => $code,
+                    // Arabic in the base column deliberately - see this
+                    // method's own docblock ("IMPORTANT, DISCLOSED
+                    // TRADE-OFF") for why.
+                    'default_name' => $names['ar'],
+                ]);
+
+                DB::table('country_state_translations')->insert([
+                    ['country_state_id' => $stateId, 'locale' => 'ar', 'default_name' => $names['ar']],
+                    ['country_state_id' => $stateId, 'locale' => 'en', 'default_name' => $names['en']],
+                ]);
+            }
+        });
+    }
+
+    /**
+     * TASK-MVP-016. Sets the tenant's channel-facing timezone to
+     * `Asia/Hebron` (the operator's approved decision) WITHOUT touching
+     * the global `config('app.timezone')` (kept at `UTC` - the operator's
+     * explicit instruction, protecting Platform Admin and any future
+     * non-Palestine tenant).
+     *
+     * MECHANISM, confirmed by direct source reading during this task's
+     * own audit (correcting an earlier, narrower finding - DECISION_LOG
+     * C60 - that no per-tenant timezone override existed anywhere):
+     * `channels.timezone` is a real, pre-existing, nullable column
+     * `Webkul\Core\Core::formatDate()` already reads FIRST (`$channel->
+     * timezone ?: config('app.timezone', 'UTC')`) - and `formatDate()` is
+     * what the Admin order detail view, the Shop customer order view,
+     * invoices, refunds, shipments, AND every order-related email
+     * template (created/canceled/invoiced/refunded/shipped, both
+     * Admin-side and Shop-side - 22 call sites, confirmed via grep)
+     * already use. Setting this ONE column is a data-only correction on
+     * an existing column, needing zero `packages/Webkul` change - exactly
+     * the `ensureChannelHostnameCorrect()` precedent.
+     *
+     * NOT COMPREHENSIVE, disclosed honestly: the Admin Orders DataGrid
+     * listing page was audited during this task and does NOT go through
+     * `formatDate()` for its date column - see docs/architecture/
+     * palestine-readiness.md "Admin Orders DataGrid timezone" for the
+     * full finding. That surface remains UTC-displayed; fixing it (if
+     * ever needed) is a separate, deferred item, not implemented here.
+     *
+     * IDEMPOTENT: a plain conditional `UPDATE`, safe to repeat.
+     */
+    protected function ensurePalestineTimezoneSet(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('channels')) {
+                throw new RuntimeException(
+                    'Cannot set Palestine timezone: channels table does not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            DB::table('channels')
+                ->where('id', 1)
+                ->where(function ($query) {
+                    $query->whereNull('timezone')->orWhere('timezone', '!=', 'Asia/Hebron');
+                })
+                ->update(['timezone' => 'Asia/Hebron']);
+        });
+    }
+
+    /**
+     * TASK-MVP-016. Two Palestine-first address defaults, both operator-
+     * approved, both written as plain `core_config` rows in exactly the
+     * shape `Webkul\Core\Repositories\CoreConfigRepository::create()`
+     * itself would produce (confirmed by reading that class directly) -
+     * a raw `DB::table('core_config')` write, not a call into that
+     * repository, matching this class's own established "narrow, known-
+     * shape write, no Webkul Eloquent/Repository dependency" convention
+     * (`ensureOwnerAdminSeeded()`, `ensureChannelHostnameCorrect()`):
+     *
+     * 1. `customer.address.requirements.postcode` -> `0` (OFF). Palestine
+     *    has no nationwide postal-code system in common use - confirmed
+     *    during this task's audit that this is a plain per-channel
+     *    boolean toggle Bagisto itself already supports, defaulting ON.
+     * 2. `country` is deliberately NOT touched here - the operator
+     *    approved a GLOBAL default country (`config('app.default_country')`
+     *    = 'PS', see `config/app.php` and `.env`), not a per-tenant
+     *    `core_config` row - country pre-selection is a single Laravel
+     *    config value Bagisto's own address-edit views already read
+     *    (`config('app.default_country')`), no per-channel mechanism
+     *    exists for it.
+     * 3. `state` requirement is deliberately left at Bagisto's own
+     *    default (ON, untouched) - real governorates are now seeded
+     *    (`ensurePalestineGovernoratesSeeded()`), so the requirement is
+     *    meaningful, not a blocker (see that method's own docblock for
+     *    the storefront free-text/dropdown behavior either way).
+     *
+     * IDEMPOTENT: guarded by `channel_code`, safe to call again.
+     */
+    protected function ensurePalestineAddressDefaultsSeeded(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('core_config') || ! Schema::hasTable('channels')) {
+                throw new RuntimeException(
+                    'Cannot seed Palestine address defaults: core_config/channels tables do not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $channelCode = DB::table('channels')->where('id', 1)->value('code');
+
+            $exists = DB::table('core_config')
+                ->where('code', 'customer.address.requirements.postcode')
+                ->where('channel_code', $channelCode)
+                ->exists();
+
+            if ($exists) {
+                return;
+            }
+
+            DB::table('core_config')->insert([
+                'code' => 'customer.address.requirements.postcode',
+                'value' => '0',
+                'channel_code' => $channelCode,
+                'locale_code' => null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+    }
+
+    /**
+     * TASK-MVP-016. Sets both payment-method defaults the operator
+     * approved: Cash on Delivery explicitly ACTIVE (with a real title),
+     * Money Transfer explicitly INACTIVE.
+     *
+     * CORRECTION, found live by this task's own regression test (test 9
+     * in `tests/Feature/Platform/TenantPalestineDefaultsProvisioningTest.php`
+     * failed against the first draft of this method, which wrote nothing
+     * for Money Transfer): the original assumption - that with ZERO
+     * `core_config` rows a payment method resolves to falsy/inactive via
+     * `SystemConfig::getConfigData()`'s own schema-`'default'` fallback -
+     * is WRONG for this specific field. `SystemConfig::getDefaultConfig()`
+     * falls through to `Config::get($strippedField, ...)`, which resolves
+     * against a COMPLETELY SEPARATE config file,
+     * `packages/Webkul/Payment/src/Config/payment-methods.php` (a
+     * `'payment_methods'`-namespaced Laravel config, unrelated to the
+     * `'sales.payment_methods.*'` ADMIN FORM SCHEMA in `system.php`) -
+     * and that file hardcodes `'active' => true` for BOTH `cashondelivery`
+     * AND `moneytransfer`. Both payment methods are therefore ALREADY
+     * ACTIVE out of the box in stock Bagisto, with no `core_config` row
+     * at all - the opposite of what was assumed. Cash on Delivery's own
+     * explicit `active=1` write below was harmless either way (redundant
+     * with the true default, but makes the intent durable/explicit
+     * regardless of any future upstream change); Money Transfer's
+     * explicit `active=0` write is NOT optional - without it, Money
+     * Transfer would be live at checkout with generic English wording and
+     * no real bank details, the exact opposite of the approved "available
+     * but inactive until the merchant's real bank details are configured"
+     * posture.
+     *
+     * `Webkul\Payment\Listeners\GenerateInvoice` remains the only real
+     * consumer of the OTHER cashondelivery config fields -
+     * `order_status`/`invoice_status`/`generate_invoice` - and only when
+     * `generate_invoice` is itself truthy, which stays unset/off here;
+     * `active` + a real `title` are sufficient for a functional,
+     * selectable checkout option.
+     *
+     * Writes `active` (channel-based only) for both methods and `title`
+     * (channel- AND locale-based, one row per tenant locale - `ar`/`en`)
+     * for Cash on Delivery only, as plain `core_config` rows, the same
+     * shape/convention as `ensurePalestineAddressDefaultsSeeded()` above.
+     *
+     * IDEMPOTENT: guarded by existence of the cashondelivery `active` row.
+     */
+    protected function ensurePalestinePaymentDefaultsSeeded(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('core_config') || ! Schema::hasTable('channels')) {
+                throw new RuntimeException(
+                    'Cannot seed Palestine payment defaults: core_config/channels tables do not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $channelCode = DB::table('channels')->where('id', 1)->value('code');
+
+            $exists = DB::table('core_config')
+                ->where('code', 'sales.payment_methods.cashondelivery.active')
+                ->where('channel_code', $channelCode)
+                ->exists();
+
+            if ($exists) {
+                return;
+            }
+
+            $now = now();
+
+            DB::table('core_config')->insert([
+                [
+                    'code' => 'sales.payment_methods.cashondelivery.active',
+                    'value' => '1',
+                    'channel_code' => $channelCode,
+                    'locale_code' => null,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ],
+                [
+                    'code' => 'sales.payment_methods.cashondelivery.title',
+                    'value' => 'الدفع عند الاستلام',
+                    'channel_code' => $channelCode,
+                    'locale_code' => 'ar',
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ],
+                [
+                    'code' => 'sales.payment_methods.moneytransfer.active',
+                    'value' => '0',
+                    'channel_code' => $channelCode,
+                    'locale_code' => null,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ],
+                [
+                    'code' => 'sales.payment_methods.cashondelivery.title',
+                    'value' => 'Cash on Delivery',
+                    'channel_code' => $channelCode,
+                    'locale_code' => 'en',
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ],
+            ]);
         });
     }
 

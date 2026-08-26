@@ -121,7 +121,17 @@ return [
     | (use capital letters!)
     */
 
-    'default_country' => null,
+    /*
+     * TASK-MVP-016. Platform-owned, Palestine-first business decision -
+     * NOT a Bagisto/Webkul default. Safe (null) unless APP_DEFAULT_COUNTRY
+     * is explicitly set - see .env.example and
+     * docs/architecture/palestine-readiness.md "Global default-country
+     * assumption" for why this is intentionally global (not per-tenant:
+     * no per-tenant mechanism exists for this value anywhere in Bagisto)
+     * and must be revisited before this platform supports merchants
+     * outside the current Palestine-focused market.
+     */
+    'default_country' => env('APP_DEFAULT_COUNTRY'),
 
     /*
     |--------------------------------------------------------------------------
