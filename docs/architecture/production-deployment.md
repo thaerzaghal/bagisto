@@ -144,18 +144,23 @@ Uses **only** supported Platform commands - never `bagisto:install`, a bare `php
 ## P. Ongoing deployment / upgrade sequence
 
 ```
-1. Pull/deploy new source
-2. echo the deployed git commit: git rev-parse HEAD > APP_COMMIT (included in the
-   synced source tree - see "Deployment source of truth" below)
-3. composer install --no-dev --optimize-autoloader
-4. php artisan platform:migrate:central          (central schema changes)
-5. php artisan platform:tenants:migrate-pending  (existing tenants pick up new tenant-scoped migrations)
-6. php artisan config:cache / route:cache / view:cache   (optional, standard Laravel perf step)
-7. Restart the queue worker, only if one is running (section I) - it must reload new code
-8. Rebuild frontend assets (Admin/Shop themes), only if this deploy changed frontend source
+1. Update the host source tree (/opt/estore/app/) to the exact target commit -
+   tar+scp+sha256-verify on both ends (see "Deployment source of truth" below).
+   This step is NOT performed by deploy.sh itself - it must happen first.
+2. php artisan platform:migrate:central          (central schema changes)
+3. php artisan platform:tenants:migrate-pending  (existing tenants pick up new tenant-scoped migrations)
+4. docker/production/deploy.sh <git-commit-sha>  (TASK-MVP-017, RISK_REGISTER.md R76,
+   DECISION_LOG.md C92) - the one canonical script for everything after source is in
+   place: writes APP_COMMIT, builds app+web TOGETHER, recreates app+web TOGETHER
+   (--no-deps - mysql/redis are never touched), clears config/route/view caches, then
+   runs `php artisan platform:production:check` as its own final gate. A non-zero
+   check exit fails the script's own exit code too - see "app/web asset consistency"
+   below. No automatic rollback: a failed gate needs a human to read the check output
+   and decide the right recovery step.
+5. Restart the queue worker, only if one is running (section I) - it must reload new code
 ```
 
-Reuses `platform:migrate:central`/`platform:tenants:migrate-pending` exactly as already built - no new deployment framework.
+Reuses `platform:migrate:central`/`platform:tenants:migrate-pending` exactly as already built - no new deployment framework. **`docker/production/deploy.sh` is now the only supported way to rebuild/recreate the running containers for a deploy** - do not hand-type `docker compose build app` (or any single-service build/recreate) directly; see "app/web asset consistency" below for exactly why.
 
 ### Deployment source of truth (RISK_REGISTER.md R65)
 
@@ -204,6 +209,65 @@ config-audit framework):
    command outright if `config('tenancy.filesystem.asset_helper_tenancy')`
    is ever anything other than `false` - not a generic audit, one targeted
    assertion for one already-proven-dangerous value (RISK_REGISTER.md R63).
+
+### app/web asset consistency (RISK_REGISTER.md R76, DECISION_LOG.md C92)
+
+**`APP_COMMIT`/"Deployed source" (above) proves `app` matches the deployed
+commit. It does NOT prove the whole running system does.** A real, live
+incident (2026-08-20, discovered during TASK-MVP-016's own production
+verification) proved exactly that gap: `Dockerfile.production` builds `web`
+(nginx, the container that actually SERVES `/themes/.../build/...` static
+assets) with a **build-time** `COPY --from=app /var/www/html/public
+/var/www/html/public` - a one-time copy baked into `web`'s own image, never a
+runtime-shared volume with `app`. Every deployment in this project's history
+before this task rebuilt/recreated `app` alone, by hand - no documentation
+had ever written the complete "rebuild both" command, so the omission of
+`web` was pure undocumented habit. `web` went 10 days without being rebuilt
+while `app` was redeployed 3 times, silently serving a 10-day-stale JS/CSS
+bundle until Admin's freshly-rebuilt Vite manifest referenced a hashed
+filename `web`'s own stale image never had - a direct 404 from nginx itself,
+never reaching PHP. The Merchant Admin Vue SPA never mounted; Login/Reset
+Password were completely inert across every tenant. `platform:production:
+check` reported PASS with the exact correct `APP_COMMIT` the entire time - it
+only ever runs inside `app`, so it structurally had zero visibility into
+`web`'s own separately-built state.
+
+**Two durable safeguards, added together (never rely on only one):**
+
+1. **`docker/production/deploy.sh`** (section P above) is now the one
+   canonical script for rebuilding/recreating containers - it always builds
+   and recreates `app` AND `web` together, never one alone. Docker's own
+   content-addressed build cache guarantees `web`'s internally-rebuilt `app`
+   stage matches exactly whenever both are built back-to-back from the same
+   source - directly proven during this incident's own recovery (rebuilding
+   `web` alone, immediately after `app` had already been correctly rebuilt,
+   produced byte-identical asset checksums between the two containers).
+2. **`platform:production:check`'s `Admin static assets`/`Shop static
+   assets` rows** (`ProductionReadinessCheck::checkThemeStaticAssets()`)
+   detect a recurrence even if a future deploy somehow bypasses the script.
+   For each theme, the check reads the REAL Vite manifest on disk
+   (`public/themes/{admin,shop}/default/build/manifest.json`) - never a
+   hardcoded generated filename - to find the CURRENT hashed CSS+JS
+   entry-point files, then makes a real internal HTTP request to
+   `http://web/themes/{admin,shop}/default/build/{file}` (the same Docker
+   Compose internal network `app`↔`web` already uses for
+   `fastcgi_pass app:9000`, so this requires no public DNS/TLS) to prove
+   `web` is actually SERVING that exact file today, not merely that it
+   exists inside `app`. A 3-second timeout, zero retries (a deterministic
+   failure must stay deterministic, not get masked by a lucky retry).
+   **FAILs** (citing this section/R76 directly) only on the precise
+   incident condition: `web` reachable but returning a non-200 for a
+   CURRENT manifest asset. **WARNs** (never fails) if `web` is genuinely
+   unreachable at all (connection refused/timeout/DNS failure) - that is
+   the correct read for any environment without this app/web split at all
+   (e.g. local Sail dev, where no `web`-named host exists), not the
+   incident condition. **INFO** if no manifest exists in this environment.
+   Both Admin AND Shop are checked (Shop's own CSS happened to survive the
+   real incident by pure luck - its filename hadn't changed across those 3
+   `app` deploys - not because of any structural protection); JS and CSS are
+   both checked for each, since both are cheap, structurally identical
+   manifest lookups and the incident's own near-miss on Shop shows relying
+   on "JS alone" would not have been a safe minimum invariant.
 
 ## Q. `packages/Webkul/*` is not our customization surface
 

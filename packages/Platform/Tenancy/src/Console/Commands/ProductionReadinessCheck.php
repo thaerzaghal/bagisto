@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Platform\Tenancy\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Redis;
 use Throwable;
 
@@ -28,7 +29,7 @@ class ProductionReadinessCheck extends Command
 {
     protected $signature = 'platform:production:check';
 
-    protected $description = 'Read-only report of obvious production-configuration issues (APP_DEBUG, trusted proxies, cache/session/response-cache posture, DB provisioning credentials, Redis reachability, mail/Stripe posture). Mutates nothing.';
+    protected $description = 'Read-only report of obvious production-configuration issues (APP_DEBUG, trusted proxies, cache/session/response-cache posture, DB provisioning credentials, Redis reachability, mail/Stripe posture, app/web static-asset consistency). Mutates nothing.';
 
     protected int $failures = 0;
 
@@ -47,6 +48,8 @@ class ProductionReadinessCheck extends Command
             $this->checkProvisioningCredentials(),
             $this->checkAssetHelperTenancy(),
             $this->checkDeployedSource(),
+            $this->checkAdminStaticAssets(),
+            $this->checkShopStaticAssets(),
             $this->checkPublicSignup(),
             $this->checkSignupAbuseProtection(),
             $this->checkRedis(),
@@ -220,6 +223,192 @@ class ProductionReadinessCheck extends Command
         $commit = trim((string) file_get_contents($marker));
 
         return $this->resultPass('Deployed source', $commit !== '' ? $commit : '(APP_COMMIT file is empty)');
+    }
+
+    /**
+     * RISK_REGISTER.md R76. Production runs TWO separately-built Docker
+     * images from the same `Dockerfile.production` (`app` - PHP-FPM, holds
+     * the current Vite manifest; `web` - nginx, the one that actually
+     * SERVES `/themes/...` static assets over HTTP, built via a build-time
+     * `COPY --from=app /var/www/html/public ...` in a third Dockerfile
+     * stage - deliberately NOT a shared runtime volume, see that file's
+     * own comments). If `web` is ever rebuilt/recreated LATER than `app`,
+     * it silently keeps serving whatever assets existed at ITS OWN last
+     * build - exactly what happened live: `web` sat 10 days stale while
+     * `app` was redeployed three times, until a Vite content-hash changed
+     * enough that `web`'s stale copy no longer had the file the CURRENT
+     * manifest referenced, breaking Merchant Admin's Vue app-mount (and
+     * therefore login/reset-password/every interactive Admin page)
+     * platform-wide. `checkDeployedSource()` above could not have caught
+     * this - it only ever runs inside `app`, with zero visibility into
+     * `web`'s own independent state.
+     *
+     * `checkAdminStaticAssets()`/`checkShopStaticAssets()` both delegate to
+     * this one shared implementation - the underlying architectural risk
+     * applies identically to both themes; the real incident only broke
+     * Admin because Shop's own content hash happened not to change between
+     * builds, not because Shop is structurally safe.
+     *
+     * ALGORITHM, deliberately never hardcoding a generated filename - only
+     * `$buildDirectory` (a fixed, structural path) and the entry-point
+     * SOURCE names (which don't change) are fixed; the actual hashed
+     * output filename is read fresh, every run, from the real current
+     * manifest:
+     *
+     * 1. Read `public_path("{$buildDirectory}/manifest.json")` directly
+     *    from THIS container's (`app`'s) own filesystem - always correct,
+     *    since `app` was just rebuilt in any real deployment.
+     * 2. For each of the two entry points every theme's own root layout
+     *    actually requests via `@bagistoVite([...])` (confirmed by
+     *    reading `anonymous.blade.php`/`index.blade.php` directly, not
+     *    assumed) - `src/Resources/assets/css/app.css` and
+     *    `src/Resources/assets/js/app.js` - look up its manifest `file`
+     *    entry. Checking BOTH, not just JS, is deliberate: cheap (one
+     *    extra HTTP request), and the real incident's own CSS survival was
+     *    coincidence (an unchanged content hash), not a structural
+     *    guarantee that would hold for a different future drift.
+     * 3. Perform a REAL, LIVE HTTP GET for that exact derived file through
+     *    `http://web/...` - Docker Compose's own internal service-name DNS
+     *    on the shared `internal` network (confirmed reachable this
+     *    direction by reading `docker/production/nginx.conf`'s own
+     *    `fastcgi_pass app:9000` line, which proves the identical
+     *    mechanism already works in the other direction). Deliberately
+     *    NOT a public HTTPS/domain request - no dependency on external
+     *    DNS, TLS, or the reverse proxy in front of `web` (all separate,
+     *    already-covered concerns) - this isolates exactly the one thing
+     *    that broke: does the `web` CONTAINER ITSELF currently have this
+     *    file. A short 3-second timeout and ZERO retries are used
+     *    deliberately - this must fail loudly and deterministically, not
+     *    mask a real problem behind a retry/backoff that could paper over
+     *    the exact drift this check exists to catch.
+     * 4. PASS only on a genuine HTTP 200 from `web` for every entry point -
+     *    this proves the asset is actually BEING SERVED by the live web
+     *    layer, not merely that a same-named file happens to exist
+     *    somewhere inside `app` (which would prove nothing about the
+     *    actual production defect).
+     *
+     * Five distinct, clearly-worded outcomes, never conflated:
+     *   - no manifest at all -> INFO (not applicable, e.g. a non-production
+     *     environment with no real Vite build)
+     *   - a manifest with an unexpected structure -> WARN (a build-config
+     *     concern, not asset drift specifically)
+     *   - `web` reachable but returning a non-200 for the CURRENT manifest
+     *     asset -> FAIL, HTTP-status wording, naming R76 directly - this
+     *     IS the exact incident condition this check exists to catch
+     *   - `web` unreachable at all (connection refused/timeout/DNS/any
+     *     transport-level exception) -> **also FAIL, not WARN** (revised
+     *     after the initial TASK-MVP-017 implementation - see below)
+     *   - `web` reachable, HTTP 200, but with the WRONG Content-Type for
+     *     the entry point (e.g. an HTML error page masquerading as a 200)
+     *     -> FAIL, the same "not actually correctly serving this asset"
+     *     failure mode as a non-200
+     *
+     * A manifest existing on `app`'s own filesystem PROVES this is an
+     * environment with a real, compiled Vite build - i.e. exactly the
+     * shape a real production deployment has. Once that's established, an
+     * unreachable `web` is no longer an ambiguous "maybe this environment
+     * just doesn't have the app/web split" signal (the original, now-
+     * corrected reasoning) - it is a production-readiness failure in its
+     * own right: `app` healthy + correct `APP_COMMIT` + a real manifest +
+     * `web` unreachable is precisely the kind of false-green state this
+     * whole check exists to eliminate, and WARNing on it (never affecting
+     * the command's exit code) would have let it slip through silently.
+     * Local/non-production environments stay green correctly anyway,
+     * because they simply have no `manifest.json` on disk at all (the
+     * INFO branch above) - there was never a real need for a second,
+     * separate "unreachable" escape hatch once that was understood.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    protected function checkAdminStaticAssets(): array
+    {
+        return $this->checkThemeStaticAssets('Admin static assets', 'themes/admin/default/build');
+    }
+
+    /** @return array{0: string, 1: string, 2: string} */
+    protected function checkShopStaticAssets(): array
+    {
+        return $this->checkThemeStaticAssets('Shop static assets', 'themes/shop/default/build');
+    }
+
+    /**
+     * Shared implementation - see `checkAdminStaticAssets()`'s own docblock
+     * for the full algorithm/rationale. Deliberately private to this class,
+     * not a reusable service - this is a narrow, one-purpose diagnostic,
+     * not a general asset-management abstraction.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    private function checkThemeStaticAssets(string $label, string $buildDirectory): array
+    {
+        $manifestPath = public_path("{$buildDirectory}/manifest.json");
+
+        if (! is_file($manifestPath)) {
+            return $this->resultInfo($label, "no Vite manifest found at {$buildDirectory}/manifest.json - not applicable in this environment.");
+        }
+
+        $manifest = json_decode((string) file_get_contents($manifestPath), true);
+
+        if (! is_array($manifest)) {
+            return $this->resultWarn($label, "manifest at {$buildDirectory}/manifest.json could not be parsed as valid JSON.");
+        }
+
+        $entryPoints = [
+            'src/Resources/assets/css/app.css',
+            'src/Resources/assets/js/app.js',
+        ];
+
+        $verifiedFiles = [];
+
+        foreach ($entryPoints as $entry) {
+            if (empty($manifest[$entry]['file'])) {
+                return $this->resultWarn($label, "manifest at {$buildDirectory}/manifest.json has no entry for [{$entry}] - unexpected build structure.");
+            }
+
+            $file = $manifest[$entry]['file'];
+            $url = "http://web/{$buildDirectory}/{$file}";
+
+            try {
+                $response = Http::timeout(3)->get($url);
+            } catch (Throwable $e) {
+                // FAIL, not WARN (corrected per explicit product-owner
+                // instruction after the initial implementation): a real
+                // manifest already exists on THIS container's own
+                // filesystem, which proves this environment has a real,
+                // compiled Vite build - exactly production's own shape.
+                // An unreachable `web` at that point is not an ambiguous
+                // "maybe there's no app/web split here" signal, it's a
+                // real production-readiness failure - app healthy +
+                // correct APP_COMMIT + a real manifest + web unreachable
+                // is precisely the false-green state R76/this check exists
+                // to eliminate. See this method's own docblock.
+                return $this->resultFail($label, "could not reach the internal web service for the CURRENT manifest asset [{$buildDirectory}/{$file}]: {$e->getMessage()} - web is likely down, unreachable, or needs rebuilding/recreating alongside app (docker/production/deploy.sh). See RISK_REGISTER.md R76.");
+            }
+
+            if ($response->status() !== 200) {
+                return $this->resultFail($label, "web returned HTTP {$response->status()} for the CURRENT manifest asset [{$buildDirectory}/{$file}] - web is likely stale and needs rebuilding/recreating alongside app (docker/production/deploy.sh). See RISK_REGISTER.md R76.");
+            }
+
+            // Optional but cheap: a 200 with the WRONG Content-Type (e.g. an
+            // HTML error/placeholder page served with a 200 status, which a
+            // misconfigured nginx `error_page`/fallback directive could
+            // produce) would otherwise pass the status-code check alone
+            // while still not actually being the asset this check exists to
+            // verify. Substring match (not an exact-type match) deliberately,
+            // to tolerate a real `; charset=...` suffix or an equally valid
+            // synonym (`application/javascript` vs `text/javascript`)
+            // without false-failing on a harmless server/mime-db difference.
+            $expectedType = str_ends_with($entry, '.css') ? 'css' : 'javascript';
+            $contentType = strtolower($response->header('Content-Type'));
+
+            if (! str_contains($contentType, $expectedType)) {
+                return $this->resultFail($label, "web returned HTTP 200 but Content-Type [{$contentType}] for the CURRENT manifest asset [{$buildDirectory}/{$file}] does not look like {$expectedType} - web may be serving an error/fallback page instead of the real asset. See RISK_REGISTER.md R76.");
+            }
+
+            $verifiedFiles[] = $file;
+        }
+
+        return $this->resultPass($label, 'current manifest assets verified being served by web: '.implode(', ', $verifiedFiles));
     }
 
     /**
