@@ -142,6 +142,63 @@ overwrites a `sender_name` already configured (whether by a prior repair run
 or a real Admin -> Configuration save). Returns a non-zero exit code only
 for a genuine per-tenant failure, never for a normal skip.
 
+**PRODUCTION REGRESSION, found and fixed (RISK_REGISTER.md R73):** the first
+production deployment showed a real `palestine-mvp-check` password-reset
+email still `From: Technify` after `seedSenderIdentity()` had correctly
+written the `core_config` row. Root cause: `config/repository.php` (stock
+Bagisto config) enables Prettus L5 Repository caching specifically for
+`Webkul\Core\Repositories\CoreConfigRepository`, invalidated only by the
+`RepositoryEntityCreated`/`Updated` events that repository's own `create()`/
+`update()` methods dispatch - the original raw `DB::table('core_config')
+->insert()` never fired them, so a tenant already read (caching the empty
+fallback) before being seeded stayed stale indefinitely. Fixed:
+`seedSenderIdentity()` now writes through `CoreConfigRepository::create()` -
+the same method `Webkul\Admin\Http\Controllers\ConfigurationController::
+store()` already uses for every real Admin Configuration save - so the same
+cache-invalidating event fires. The pre-existing raw-DB existence check is
+unchanged (reads never need invalidation, only writes do).
+
+**One-time production cache invalidation still required for
+`palestine-mvp-check` specifically** (documented here, not yet executed): its
+`core_config` row already exists from the original (buggy) repair run, so the
+fixed write path's own idempotency guard will correctly SKIP re-writing it -
+meaning redeploying the fix alone does not retroactively clear its already-
+stale cache entry. The exact supported mechanism - the same one Bagisto's own
+`Webkul\Core\Listeners\CleanCacheRepository` uses internally when a real
+`RepositoryEntityCreated`/`Updated` event fires, invoked directly here since
+no such event exists to dispatch for an already-correct row - run inside that
+tenant's own context so only its own tracked key list (`storage_path()` is
+tenant-suffixed, so `repository-cache-keys.json` is itself per-tenant) is
+touched:
+
+```php
+// php artisan tinker (production), or an equivalent one-off script:
+$tenant = \Platform\Tenancy\Models\Tenant::find('palestine-mvp-check');
+$tenant->run(function () {
+    $keys = \Prettus\Repository\Helpers\CacheKeys::getKeys(
+        \Webkul\Core\Repositories\CoreConfigRepository::class
+    );
+    $cache = app(config('repository.cache.repository', 'cache'));
+    foreach ($keys as $key) {
+        $cache->forget($key);
+    }
+});
+```
+
+No DB row is touched, no arbitrary value is written to trigger a fake event,
+no `php artisan cache:clear` (which would flush every cache key on the
+server, not just this repository's), and no wildcard Redis command. **Blast
+radius**: scoped to whatever cache keys `palestine-mvp-check`'s own reads
+have generated for `CoreConfigRepository` (tracked in that tenant's own
+suffixed `storage_path()`, not a shared cross-tenant file) - cache-only, no
+tenant data is mutated. A narrow, low-probability residual: if a different
+tenant's `CoreConfigRepository` read happened to produce an identical MD5
+cache-key hash (possible only via `request()->fullUrl()` collisions in a
+CLI/console context, not from any real per-tenant HTTP request), that
+tenant's equivalent cached entry would also be cleared - never its real data,
+only a cache entry it would recompute correctly on its next read regardless.
+Not executed as part of this checkpoint.
+
 ## Secrets
 
 The Zoho Application-Specific Password is supplied as `MAIL_PASSWORD` via

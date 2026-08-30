@@ -16,6 +16,7 @@ use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Support\PalestineGovernorates;
 use RuntimeException;
 use Throwable;
+use Webkul\Core\Repositories\CoreConfigRepository;
 
 /**
  * Explicit, observable, retryable tenant provisioning - see
@@ -252,7 +253,65 @@ class TenantProvisioner
      * if a `sender_name` row already exists for this tenant's default
      * channel - whether seeded by an earlier call to this same method or
      * manually configured by a merchant/admin through the real Admin
-     * Configuration UI. Safe to call any number of times.
+     * Configuration UI. Safe to call any number of times. The existence
+     * check itself is a plain `DB::table()` read, deliberately NOT routed
+     * through `CoreConfigRepository` - reads never need cache invalidation,
+     * only writes do (see the PRODUCTION REGRESSION note below), so there is
+     * no reason to pay for the repository/event/cache machinery here.
+     *
+     * PRODUCTION REGRESSION (found live, first real deployment, RISK_REGISTER.md
+     * R73): this method originally wrote the row via a raw `DB::table(
+     * 'core_config')->insert()`, matching this class's own established
+     * "narrow, known-shape write, no Webkul Eloquent/Repository dependency"
+     * convention (see `ensurePalestineAddressDefaultsSeeded()`/
+     * `ensurePalestinePaymentDefaultsSeeded()`). That convention is SAFE for
+     * every OTHER field those methods write, because nothing else in this
+     * codebase reads `core_config` through a CACHED path - but
+     * `emails.configure.email_settings.*` is a genuine exception:
+     * `config/repository.php` (stock, unmodified Bagisto config - not
+     * introduced by this project) explicitly enables Prettus L5 Repository
+     * caching for `Webkul\Core\Repositories\CoreConfigRepository`
+     * specifically (`'repositories' => ['Webkul\Core\Repositories\
+     * CoreConfigRepository' => ['enabled' => true]]`), backed by
+     * `CACHE_STORE=redis` in production. That cache is only ever invalidated
+     * by the `RepositoryEntityCreated`/`RepositoryEntityUpdated` events
+     * Prettus's OWN `create()`/`update()` methods dispatch - a raw
+     * `DB::table()->insert()` never fires them. Found live: a real
+     * `palestine-mvp-check` password-reset email still showed "Technify"
+     * after this method had correctly written the DB row, because
+     * `Core::getSenderEmailDetails()`'s read had already been cached (empty/
+     * fallback) before this method ever ran, and the raw insert never
+     * invalidated it - proven by direct Redis inspection (DB 1, the real
+     * cache store - `REDIS_CACHE_DB=1` - not DB 0, which a first, incomplete
+     * check wrongly read as empty) showing 1000+ live `CoreConfigRepository@
+     * findWhere-*` keys, and by reproducing the exact stale-vs-fresh split
+     * via `CoreConfigRepository::findWhere()`'s own cache-key composition
+     * (keyed off `serialize(func_get_args())`, so the 1-argument call shape
+     * this method's own read never used differs from the 2-argument shape
+     * `getConfigData()`'s real call chain always uses internally).
+     *
+     * FIX: write through `Webkul\Core\Repositories\CoreConfigRepository::
+     * create()` instead - the SAME method `Webkul\Admin\Http\Controllers\
+     * ConfigurationController::store()` already calls for every real Admin
+     * Configuration save (confirmed by reading that controller directly:
+     * `$this->coreConfigRepository->create($request->except([...]))`), so
+     * this reuses Bagisto's own already-correct, already-cache-invalidating
+     * write path instead of re-implementing it. `create()` itself performs
+     * its own existence check internally and would UPDATE an existing row
+     * rather than insert a duplicate - this method's own PRIOR existence
+     * check above is what preserves the "never overwrite" guarantee (create()
+     * is only ever reached when nothing exists yet).
+     *
+     * DELIBERATE, NARROW EXCEPTION to `Platform\Tenancy`'s own established
+     * "no direct `Webkul\*` class dependency" boundary (see
+     * `ensurePalestineCurrencySeeded()`'s own docblock for that boundary and
+     * its one prior exception, `Platform\Enforcement`, DECISION_LOG C23):
+     * unlike a plain data value (a currency symbol, hardcodable without any
+     * Webkul import), the correctness property this fix needs - cache
+     * invalidation tied to Prettus's own event dispatch - cannot be
+     * replicated by any raw-write technique; only calling the real
+     * repository class produces it. This is intentionally the SECOND such
+     * exception, not a silent precedent break.
      *
      * Nested `Tenant::run()` calls (this method always calls its own,
      * regardless of whether the caller is already inside one) are safe by
@@ -290,13 +349,16 @@ class TenantProvisioner
                 return 'already_configured';
             }
 
-            DB::table('core_config')->insert([
-                'code' => 'emails.configure.email_settings.sender_name',
-                'value' => $storeName,
-                'channel_code' => $channelCode,
-                'locale_code' => null,
-                'created_at' => now(),
-                'updated_at' => now(),
+            app(CoreConfigRepository::class)->create([
+                'locale' => null,
+                'channel' => $channelCode,
+                'emails' => [
+                    'configure' => [
+                        'email_settings' => [
+                            'sender_name' => $storeName,
+                        ],
+                    ],
+                ],
             ]);
 
             return 'seeded';

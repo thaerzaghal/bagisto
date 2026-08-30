@@ -35,8 +35,34 @@
  * `Illuminate\Mail\Transport\ArrayTransport` - the same established
  * technique `OwnerActivationEmailUrlTest.php`/`TenantMailConfigurationTest.
  * php` already use.
+ *
+ * SECTION E (real production regression, RISK_REGISTER.md R73): the first
+ * production deployment of this task found a real bug the tests above never
+ * caught - `seedSenderIdentity()` originally wrote via a raw `DB::table(
+ * 'core_config')->insert()`, which is safe for every OTHER raw core_config
+ * write in this codebase but not this one, because `config/repository.php`
+ * (stock, unmodified Bagisto - not introduced by this project) explicitly
+ * enables Prettus L5 Repository caching specifically for `Webkul\Core\
+ * Repositories\CoreConfigRepository`. A tenant whose sender identity had
+ * already been READ (caching the empty/fallback result) before the SEED
+ * step ran would keep seeing the stale cached value indefinitely - a raw
+ * insert never fires the `RepositoryEntityCreated` event Prettus's own
+ * cache-invalidation listener depends on. Tests 1-15 never caught this
+ * because they always seed BEFORE the first read in the same process - the
+ * exact ordering that never triggers a stale cache. Section E reproduces
+ * the real production ordering (read first, THEN seed, THEN read again,
+ * with no manual cache-clear) - it failed against the original raw-insert
+ * implementation and passes now that `seedSenderIdentity()` writes through
+ * `Webkul\Core\Repositories\CoreConfigRepository::create()` (the same
+ * method `Webkul\Admin\Http\Controllers\ConfigurationController::store()`
+ * already uses for every real Admin Configuration save), which correctly
+ * fires that event. No Redis needed - `CoreConfigRepository`'s cache is
+ * enabled per-repository regardless of which cache store backs it, so this
+ * test env's own `CACHE_STORE=array` (`phpunit.xml`) already exercises the
+ * identical caching layer, in-process.
  */
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
@@ -435,4 +461,58 @@ test('15. a tenant with no trustworthy store name is skipped by repair and keeps
         ->exists());
 
     expect($exists)->toBeFalse();
+});
+
+// ── E. Cache invalidation regression (real production bug, R73) ────────
+
+test('16. a repository-cached read BEFORE seeding is correctly invalidated by the write path - no manual cache-clear needed', function () {
+    // Reset to "tenant exists, no sender_name yet" - the exact starting
+    // state `palestine-mvp-check` was really in.
+    $this->tenantRepair->run(fn () => DB::table('core_config')
+        ->where('code', 'emails.configure.email_settings.sender_name')
+        ->delete());
+
+    Cache::flush();
+
+    // Step 1/2: READ FIRST, before seeding - core()->getSenderEmailDetails()
+    // resolves through Webkul\Core\Repositories\CoreConfigRepository, whose
+    // caching IS active (config/repository.php enables it specifically for
+    // this repository, independent of the global repository.cache.enabled
+    // default) - this primes the cache with the empty/fallback "Technify"
+    // result, exactly like a tenant whose Admin Configuration page (or any
+    // other core_config read) was already visited before its sender
+    // identity was seeded.
+    $before = $this->tenantRepair->run(fn () => core()->getSenderEmailDetails());
+    expect($before['name'])->toBe(config('mail.from.name'));
+
+    // Step 3: seed - through the real, fixed shared primitive.
+    $outcome = app(TenantProvisioner::class)->seedSenderIdentity($this->tenantRepair, TMSI_STORE_NAME_REPAIR);
+    expect($outcome)->toBe('seeded');
+
+    // Step 4/5: read again, with NO manual cache-clear in between - must
+    // see the freshly-seeded value. This is the exact assertion that fails
+    // against the original raw DB::table()->insert() implementation (it
+    // would still return the step-2 cached "Technify") and passes against
+    // the CoreConfigRepository::create()-based fix (its own
+    // RepositoryEntityCreated event invalidates the cache step 2 primed).
+    $after = $this->tenantRepair->run(fn () => core()->getSenderEmailDetails());
+    expect($after['name'])->toBe(TMSI_STORE_NAME_REPAIR);
+});
+
+test('17. the repair command\'s own seed also survives a pre-existing cached read, without a manual cache-clear', function () {
+    $this->tenantRepair->run(fn () => DB::table('core_config')
+        ->where('code', 'emails.configure.email_settings.sender_name')
+        ->delete());
+
+    Cache::flush();
+
+    $before = $this->tenantRepair->run(fn () => core()->getSenderEmailDetails());
+    expect($before['name'])->toBe(config('mail.from.name'));
+
+    $exit = test()->artisan('platform:tenants:repair-sender-identity', ['--tenant' => [TMSI_TENANT_REPAIR]])
+        ->run();
+    expect($exit)->toBe(0);
+
+    $after = $this->tenantRepair->run(fn () => core()->getSenderEmailDetails());
+    expect($after['name'])->toBe(TMSI_STORE_NAME_REPAIR);
 });

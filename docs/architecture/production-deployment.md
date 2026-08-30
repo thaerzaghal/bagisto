@@ -436,6 +436,21 @@ The prior manually-created `rollback-pre-mvp017` tags remain on the host
 until the canonical `:rollback` pair is proven valid by a real production
 deployment - not removed as a side effect of this change.
 
+**R77 - CLOSED.** The first production deployment (TASK-OPS-019 itself)
+verified every mechanism above live; the required SUBSEQUENT-deploy evidence
+that growth stays bounded on an ongoing basis - not merely that it was reset
+once - arrived via TASK-MVP-018's own real, source-changing production
+deployment: dependency-install layers all reported `CACHED`, root filesystem
+usage stayed exactly flat (66%→66%, 29G free before and after), the age-
+bounded builder prune correctly reclaimed 0B (nothing had aged past 7 days
+yet), the image prune removed only one genuinely dangling image, rollback
+metadata advanced correctly, and mysql/redis were confirmed untouched. This
+closes the specific "bounded across real deploys" criterion, not a claim that
+disk usage can never grow - a deploy that genuinely changes `composer.lock`/
+`package.json` will still correctly invalidate and rebuild those layers, and
+the daily cron backstop above remains in place regardless. See
+RISK_REGISTER.md R77 for the full evidence chain.
+
 ## Q. `packages/Webkul/*` is not our customization surface
 
 Every command, config change, and deployment step in this document operates entirely on `Platform\*` packages, root config files, and `bootstrap/app.php`. Nothing in this document requires, and nothing should ever require, editing `packages/Webkul/*` - that remains Bagisto's own unmodified upstream code for the lifetime of this project.
