@@ -123,27 +123,42 @@ correct name/price/image render.
 
 ## 7. Verify shipping/payment
 
+**Current MVP payment policy (TASK-MVP-023, RISK_REGISTER.md R78): COD-only.**
+Cash on Delivery is the ONLY supported storefront payment method right now.
+Money Transfer and every bundled external gateway (Stripe, PayPal, Razorpay,
+PayU, PhonePe, PayGlocal) are intentionally out of current scope — do not
+instruct a merchant to configure any of them.
+
 - [ ] `[Automated]` **Cash on Delivery is enabled by default** (TASK-MVP-016)
       — `[Verify]` it appears and is selectable at checkout, no configuration
       needed.
-- [ ] `[Automated]` **Money Transfer is present but inactive** — `[Merchant]`/
-      `[Operator]` must enable it AND enter the merchant's real bank/account
-      details (Configure → Sales → Payment Methods → Money Transfer) before
-      it's usable. Never invent placeholder bank details.
+- [ ] `[Automated]` **Money Transfer, Stripe, PayPal (Smart Button + Standard),
+      Razorpay, PayU, PhonePe, and PayGlocal are all seeded inactive by
+      default** (TASK-MVP-023) — `[Verify]` none of them appear as a
+      selectable payment method at real checkout. Do not enable any of them
+      for the current MVP; Money Transfer in particular must stay inactive
+      until a real local electronic-payment decision is made (see
+      `docs/architecture/billing.md` "Domain 1: customer → merchant") — never
+      enter placeholder bank details or gateway credentials just to "make it
+      work."
+- [ ] `[Operator]` If this tenant was provisioned before TASK-MVP-023
+      (check `APP_COMMIT`/provisioning date against the deploy that shipped
+      it), run `platform:tenants:enforce-cod-only-payments --tenant={id}
+      --dry-run` first, review the reported changes, then re-run without
+      `--dry-run` after a separate, explicit approval — never assumed as
+      part of routine onboarding for a brand-new tenant, which is already
+      correct automatically.
 - [ ] `[Merchant]`/`[Operator]` At least one shipping method enabled (Free
       Shipping or Flat Rate — built in, require no external account). The
       delivery fee itself is never pre-filled — enter the real amount.
-- [ ] Stripe requires real API keys the operator does not have for merchants
-      by default — not configured, not expected for a first Palestinian
-      merchant.
 - [ ] `[Automated]` Tax — **intentionally left unconfigured** (zero
       categories/rates seeded, by design). Do not assume a rate; use
       whatever the merchant/operator has actually confirmed applies with
       real legal/accounting input (Configure → Sales → Taxes). The store
       runs correctly tax-free until you do.
 
-`[Verify]` The configured payment/shipping combination is actually
-selectable at checkout (see Section 8).
+`[Verify]` Checkout exposes ONLY Cash on Delivery as a selectable payment
+method (see Section 8).
 
 ## 8. Test storefront/order flow
 

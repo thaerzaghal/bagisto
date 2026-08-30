@@ -13,6 +13,7 @@ use Illuminate\Routing\Events\RouteMatched;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
+use Platform\Tenancy\Console\Commands\EnforceCodOnlyPaymentPosture;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\MigrateCentral;
 use Platform\Tenancy\Console\Commands\MigratePendingTenants;
@@ -229,6 +230,7 @@ class TenancyServiceProvider extends ServiceProvider
                 MigratePendingTenants::class,
                 RepairChannelHostname::class,
                 RepairSenderIdentity::class,
+                EnforceCodOnlyPaymentPosture::class,
                 ProductionReadinessCheck::class,
             ]);
         }

@@ -14,6 +14,7 @@ use Platform\Subscriptions\Services\SubscriptionLifecycle;
 use Platform\Tenancy\Enums\TenantStatus;
 use Platform\Tenancy\Models\Tenant;
 use Platform\Tenancy\Support\PalestineGovernorates;
+use Platform\Tenancy\Support\UnsupportedPaymentGateways;
 use RuntimeException;
 use Throwable;
 use Webkul\Core\Repositories\CoreConfigRepository;
@@ -82,6 +83,7 @@ class TenantProvisioner
             $this->ensurePalestineTimezoneSet($tenant);
             $this->ensurePalestineAddressDefaultsSeeded($tenant);
             $this->ensurePalestinePaymentDefaultsSeeded($tenant);
+            $this->ensureUnsupportedPaymentGatewaysDeactivated($tenant);
             $this->ensureChannelHostnameCorrect($tenant);
             $this->ensureInitialSubscriptionStarted($tenant);
             $this->ensureOwnerAdminSeeded($tenant, $ownerAdmin);
@@ -989,6 +991,78 @@ class TenantProvisioner
                             'title' => 'Cash on Delivery',
                         ],
                     ],
+                ],
+            ]);
+        });
+    }
+
+    /**
+     * TASK-MVP-023 (RISK_REGISTER.md R78). PRODUCT DECISION: the only
+     * supported storefront payment method for the current MVP is Cash On
+     * Delivery - every other bundled Bagisto payment method is out of
+     * current scope, not merely unconfigured. See
+     * `Platform\Tenancy\Support\UnsupportedPaymentGateways`'s own
+     * docblock for the full root-cause record (every one of the seven
+     * listed gateways ships `active => true` with a non-empty PLACEHOLDER
+     * credential in its own package config, so it is structurally
+     * selectable at real checkout unless explicitly deactivated here).
+     *
+     * Deliberately a SEPARATE step from `ensurePalestinePaymentDefaultsSeeded()`
+     * above, even though both currently only ever run for the same
+     * Palestine-first tenants: that method encodes REGIONAL defaults
+     * (which of Bagisto's existing methods make sense for this market);
+     * this one encodes a distinct, evolvable MVP PRODUCT-SCOPE decision
+     * (which bundled methods Technify currently supports at all,
+     * platform-wide) - keeping them separate means this policy can change
+     * independently of Palestine-specific seeding.
+     *
+     * Same `CoreConfigRepository::create()` write path as every other
+     * cache-safe write in this class (R73/C95) - `active` is
+     * `channel_based => true, locale_based => false` for every one of
+     * these methods (confirmed by reading `packages/Webkul/Admin/src/
+     * Config/system.php` directly), so a single `create()` call with one
+     * arbitrary `'locale'` value covers all seven writes in one pass -
+     * `CoreConfigRepository::create()` ignores `'locale'` entirely for a
+     * non-locale-based field (confirmed by reading its own per-field
+     * branching directly).
+     *
+     * IDEMPOTENT: guarded by existence of the first listed gateway's
+     * `active` row - a no-op if this step already ran, whether seeded by
+     * an earlier provisioning run or a real Admin Configuration save;
+     * never overwrites a merchant's own later choice to reactivate a
+     * gateway (that remains a normal, supported Admin action - this step
+     * only sets the INITIAL default, exactly like every other Palestine
+     * default in this class).
+     */
+    protected function ensureUnsupportedPaymentGatewaysDeactivated(Tenant $tenant): void
+    {
+        $tenant->run(function () {
+            if (! Schema::hasTable('core_config') || ! Schema::hasTable('channels')) {
+                throw new RuntimeException(
+                    'Cannot deactivate unsupported payment gateways: core_config/channels tables do not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $channelCode = DB::table('channels')->where('id', 1)->value('code');
+
+            $exists = DB::table('core_config')
+                ->where('code', 'sales.payment_methods.'.UnsupportedPaymentGateways::CODES[0].'.active')
+                ->where('channel_code', $channelCode)
+                ->exists();
+
+            if ($exists) {
+                return;
+            }
+
+            $repository = app(CoreConfigRepository::class);
+
+            $repository->create([
+                'locale' => 'ar',
+                'channel' => $channelCode,
+                'sales' => [
+                    'payment_methods' => collect(UnsupportedPaymentGateways::CODES)
+                        ->mapWithKeys(fn (string $code) => [$code => ['active' => '0']])
+                        ->all(),
                 ],
             ]);
         });
