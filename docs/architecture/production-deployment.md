@@ -255,19 +255,171 @@ only ever runs inside `app`, so it structurally had zero visibility into
    `web` is actually SERVING that exact file today, not merely that it
    exists inside `app`. A 3-second timeout, zero retries (a deterministic
    failure must stay deterministic, not get masked by a lucky retry).
-   **FAILs** (citing this section/R76 directly) only on the precise
-   incident condition: `web` reachable but returning a non-200 for a
-   CURRENT manifest asset. **WARNs** (never fails) if `web` is genuinely
-   unreachable at all (connection refused/timeout/DNS failure) - that is
-   the correct read for any environment without this app/web split at all
-   (e.g. local Sail dev, where no `web`-named host exists), not the
-   incident condition. **INFO** if no manifest exists in this environment.
+   **FAILs** (citing this section/R76 directly) on a reachable `web`
+   returning a non-200 for a CURRENT manifest asset, on a wrong
+   Content-Type for that asset, AND (corrected after the initial
+   TASK-MVP-017 implementation - see RISK_REGISTER.md R76's own row) on
+   `web` being genuinely unreachable at all: a real manifest already
+   existing on `app`'s own filesystem proves this IS a production-shaped
+   deployment, so an unreachable `web` at that point is a real
+   production-readiness failure, not an ambiguous "maybe there's no
+   app/web split here" signal. **INFO** if no manifest exists at all in
+   this environment - the correct, non-incident read for local Sail dev,
+   where no `web`-named host or real Vite build exists in the first place.
    Both Admin AND Shop are checked (Shop's own CSS happened to survive the
    real incident by pure luck - its filename hadn't changed across those 3
    `app` deploys - not because of any structural protection); JS and CSS are
    both checked for each, since both are cheap, structurally identical
    manifest lookups and the incident's own near-miss on Shop shows relying
    on "JS alone" would not have been a safe minimum invariant.
+
+### Docker disk hygiene (RISK_REGISTER.md R77, DECISION_LOG.md C93)
+
+**Root filesystem reached 94% used (~30GB under `/var/lib/docker` alone) with
+no disk lifecycle policy anywhere** (TASK-OPS-018, discovered as an urgent
+operational finding, unrelated to any application code defect). TASK-OPS-019
+root-caused and fixed it, closing the loop this section describes.
+
+**Root cause, fixed - not merely a bigger cleanup.** `Dockerfile.production`'s
+`assets`/`app` stages both ran `COPY . .` (the entire repository) BEFORE
+`npm install`/`composer install`. Since the build context changes on nearly
+every real deploy, this invalidated the cache for those expensive layers -
+and everything after them - on essentially every deployment, REGARDLESS of
+whether `composer.lock`/`package.json` actually changed (confirmed directly
+from TASK-MVP-017's own real build transcript: `composer.lock` was
+byte-identical to the prior deploy, yet a full 172-package
+download/extract still ran). Each theme's `package.json` and the root
+`composer.json`/`composer.lock` are now copied and their respective install
+commands run BEFORE the full source `COPY` - those layers are now cached on
+manifest content alone, reused whenever a deploy doesn't actually touch
+dependencies. Proven with a real local two-build test (not merely asserted):
+a second build containing only a source-only change showed `npm install`
+(both themes) and `composer install` all reporting `CACHED`, while the full
+`COPY . .`/`npm run build`/`composer dump-autoload` steps correctly reran.
+
+The Composer split runs `composer install --no-dev --no-scripts
+--no-autoloader` first (needs only `composer.json`/`composer.lock` - proven
+by direct inspection that the declared `path` repository, `packages/*/*`,
+resolves ZERO actual packages; `Webkul\*`/`Platform\*` are wired entirely
+through the plain `autoload.psr-4` map instead), then, once the full source
+exists, `composer dump-autoload --optimize --no-dev --no-scripts`.
+`--no-scripts` is deliberately kept on BOTH commands, exactly matching the
+original single-step command's own already-proven-safe behavior - confirmed
+via `git show` that the original always passed `--no-scripts` too, meaning
+`artisan package:discover` has never once run during any production build in
+this project's history. A real local build failure hit during this exact
+implementation ("Please provide a valid cache path" from Laravel's Blade
+view compiler, triggered by eagerly running that script before
+`storage/framework/views` is configured) directly proved why introducing it
+now would have been unsafe.
+
+**Cleanup is bounded, not unconditional.** Because the Dockerfile fix makes
+cross-deploy cache genuinely worth keeping, `deploy.sh` does NOT run a
+blanket `docker builder prune -f` after every deploy. Instead, only after a
+full deployment success and a passing `platform:production:check`, it
+delegates to `docker/production/docker-disk-hygiene.sh` (a small, shared,
+always-best-effort script - never fails the deployment itself), which runs:
+
+1. `docker builder prune -f --filter "until=168h"` - age-bounded (7 days),
+   never unconditional. `--filter until=` was verified directly against
+   this project's real Docker/BuildKit version (not guessed): a real local
+   before/after test proved it filters by each cache entry's own
+   LAST-ACCESSED time, and never touches cache still backing an existing
+   image/build regardless of age.
+2. `docker image prune -f` - narrow, dangling-only, never `-a`, never
+   touches a tagged/in-use image (structurally guaranteed by Docker
+   itself), so `estore-app:latest`/`estore-web:latest`/`estore-app:
+   rollback`/`estore-web:rollback`/`mysql:8.0`/`redis:7-alpine`/any
+   unrelated tagged image already on the host are all untouched.
+
+Neither ever runs `docker system prune`, `docker image prune -a`, or any
+volume-affecting command.
+
+**Fail-closed disk pre-flight gate.** Before any build, `deploy.sh` now
+reads the real `df` state (never Docker's own "reclaimable" byte accounting
+- directly observed, during TASK-OPS-018's own cleanup, to re-inflate after
+a real prune while the actual filesystem stayed flat) for the filesystem
+BACKING DOCKER'S OWN DATA ROOT - resolved dynamically via `docker info
+--format '{{.DockerRootDir}}'`, never hardcoded as `/var/lib/docker`, since
+that is what `docker compose build`/BuildKit actually consumes storage on.
+If that cannot even be resolved, the gate fails closed rather than
+guessing. The host source tree's own filesystem is checked too, but only as
+a genuinely separate check when `df` reports a different backing device -
+avoiding a redundant duplicate check on today's shared-filesystem topology,
+while staying correct if that topology ever changes. Refuses to start if
+free space is below **8GB** or usage is above **92%** on either checked
+filesystem - roughly 3x headroom over this project's own observed
+worst-case single-build transient footprint (~2-3GB), deliberately not
+tight for this ~83GB disk. A **75%** usage crossing is reported as an
+informational warning (before the build, and again after cleanup) but never
+fails anything on its own.
+
+**Concurrency lock.** `deploy.sh` and `docker-disk-hygiene.sh` share one
+`flock`-based exclusive lock (`${APP_ROOT}/.docker-deploy.lock`, `flock`
+from `util-linux` - confirmed already installed on the real production host,
+no new package required), held by `deploy.sh` for its ENTIRE run. This
+closes a real race: a scheduled hygiene run's own `docker image prune -f`
+could otherwise sweep the very image `deploy.sh` is about to preserve as a
+rollback target, since that image sits briefly dangling between the build
+reassigning `:latest` and the later rollback-tag-advance step (potentially
+minutes later, after the full recreate + verification sequence) - a window
+BuildKit's own in-use cache tracking does not protect, since that only ever
+covers active build cache, never a plain dangling image. Run standalone by
+cron, `docker-disk-hygiene.sh` acquires the lock itself (non-blocking) and
+safely skips its own run (exit 0, not an error) if a deployment currently
+holds it - the next scheduled cycle covers it. When invoked as `deploy.sh`'s
+own child process (`DOCKER_HYGIENE_LOCK_HELD=1`), it does NOT try to
+acquire the lock again itself, avoiding a self-deadlock. Verified with real
+`flock` in a Linux environment matching production (not merely reasoned
+about): both directions were directly tested.
+
+**Scheduled backstop, independent of `deploy.sh`.** `docker-disk-hygiene.sh`
+is also intended to run on its own daily schedule, so growth stays bounded
+even if `deploy.sh` itself is ever bypassed - the same "undocumented habit"
+failure mode R76/C92 already closed for the app+web-together problem,
+applied here to disk hygiene. **Production installation step** (not yet
+applied - see RISK_REGISTER.md R77's own closure criteria): add to the root
+crontab, in the same style as the existing backup jobs (`crontab -l` already
+shows those at 03:15-03:50) but at a different time and a dedicated log file
+- never mixed with `/opt/estore/backups/backup-run.log`:
+
+```
+# TASK-OPS-019 - Docker disk hygiene backstop (04:00, independent of deploy.sh)
+0 4 * * * cd /opt/estore/app && /usr/bin/env bash docker/production/docker-disk-hygiene.sh >> /opt/estore/docker-hygiene.log 2>&1
+```
+
+**Rollback pair.** `estore-app:rollback`/`estore-web:rollback` (plus a
+`ROLLBACK_COMMIT` marker file at `/opt/estore/app/ROLLBACK_COMMIT`,
+mirroring `APP_COMMIT`'s own established convention, written via
+temp-file-then-rename so it is never observed half-written) replace the
+one-off `estore-app:rollback-pre-mvp017`/`estore-web:rollback-pre-mvp017`
+tags TASK-OPS-018 manually created on the real server. The pointer is
+captured BEFORE each deploy's own build runs, and advanced ONLY after that
+deploy fully succeeds and passes `platform:production:check` - so it always
+means "the deployment immediately preceding the one just verified," never
+merely "whatever the build happened to leave dangling." The PREVIOUSLY-valid
+rollback record is ALSO captured before anything is touched; all three
+pieces of the new record are re-read and cross-checked after writing, and if
+advancing to it fails or is inconsistent, a best-effort restore of the
+previously-valid record is attempted and independently re-validated - the
+exact outcome (new record confirmed / previous record restored / no
+previous record existed / metadata remains inconsistent) is always reported
+explicitly, never silently claiming a valid pair exists. None of this ever
+fails the deployment itself (the primary deployment has already succeeded
+by that point - a rollback-bookkeeping gap is a safety-net concern, not a
+production-health one).
+
+**Image rollback alone is explicitly NOT sufficient, and remains manual.**
+Retagging `:rollback` onto `:latest` and recreating containers reverts only
+the application code/asset layer - never the host source tree (a separate
+R65/C76 process) or database migrations (never reversible by any tooling in
+this project). Before ever using the rollback pair, confirm no
+schema-affecting migration ran in the deployment being reverted. This
+project does not implement or endorse automatic rollback in any form.
+
+The prior manually-created `rollback-pre-mvp017` tags remain on the host
+until the canonical `:rollback` pair is proven valid by a real production
+deployment - not removed as a side effect of this change.
 
 ## Q. `packages/Webkul/*` is not our customization surface
 

@@ -5,6 +5,17 @@
 # (`git rev-parse HEAD > APP_COMMIT`), never committed - see
 # docs/architecture/production-deployment.md "Deployment source of truth".
 /APP_COMMIT
+# TASK-OPS-019/R77. Same convention as APP_COMMIT above, but records which
+# commit the estore-app:rollback/estore-web:rollback image pair
+# represents - written fresh by docker/production/deploy.sh, never
+# committed - see docs/architecture/production-deployment.md "Docker disk
+# hygiene".
+/ROLLBACK_COMMIT
+# TASK-OPS-019/R77. Runtime lock file used by docker/production/deploy.sh
+# and docker/production/docker-disk-hygiene.sh to serialize deployments
+# against the scheduled disk-hygiene cron backstop - created fresh by
+# `flock` at runtime, never committed.
+/.docker-deploy.lock
 .claude
 .cursor
 .env

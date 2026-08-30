@@ -15,16 +15,51 @@
 # what already exists there.
 
 # ---- Stage 1: frontend assets (Admin + Shop themes) ----
-# `npm install`, not `npm ci` - confirmed via `git ls-files` that no
-# package-lock.json exists anywhere in this repo (upstream Bagisto never
-# committed one for any package), so `ci` (which requires a lock file) can
-# never succeed here; `install` is the correct command for this repo's
-# actual state, not a fallback/workaround.
+# `npm install`, not `npm ci` - re-verified directly for TASK-OPS-019, not
+# re-guessed: `git ls-files` confirms no `package-lock.json`/
+# `npm-shrinkwrap.json` is TRACKED anywhere in this repo for either theme
+# (upstream Bagisto never committed one for any package) - Shop has no
+# lockfile in any form, not even a local one. Admin DOES have a local
+# `package-lock.json` on disk in some working copies (a byproduct of
+# someone's own prior local `npm install`), but it is explicitly excluded
+# from version control by TWO separate `.gitignore` rules (the root
+# `.gitignore`'s bare `package-lock.json` pattern AND `packages/Webkul/
+# Admin/.gitignore`'s own `/package-lock.json` entry) - confirmed via
+# `git check-ignore -v`, not assumed. Production's real build source is
+# always a `git archive` extraction of TRACKED files only (R65/C76's own
+# "host source tree" process), so that local file is NEVER present in a
+# real production build regardless of what exists on any one developer's
+# disk - copying/trusting it here would work by accident in a raw local
+# `docker build .` (which includes untracked files in its context) while
+# silently breaking or being silently skipped in the one environment that
+# actually matters. `install` (not `ci`) is therefore still the correct,
+# intentional choice for BOTH themes - not a fallback/workaround, and not
+# something this task invents a new lockfile to change.
+#
+# TASK-OPS-019 (RISK_REGISTER.md R77): each theme's own `package.json` is
+# copied and `npm install` run BEFORE the rest of the source tree - this
+# layer is now cached on that one file's content alone, reused whenever a
+# deploy doesn't touch either theme's own dependencies, regardless of what
+# else in the repository changed (previously, a single `COPY . .` before
+# `npm install` meant ANY change anywhere in the whole repo invalidated
+# this layer on every deploy - confirmed directly, not guessed, by reading
+# both `package.json` files: neither declares a `preinstall`/`postinstall`
+# script or any other file dependency, so `package.json` alone is
+# sufficient for `npm install` to run correctly here). `npm run build`
+# itself still needs the full source tree (Vite resolves the actual
+# `src/Resources/assets/...` files, plus each theme's own relative
+# `envDir`/`publicDirectory` paths - see `vite.config.js`), so it
+# deliberately stays AFTER the full `COPY . .` below, unchanged in spirit
+# from the original single-step ordering.
 FROM node:20-alpine AS assets
 WORKDIR /build
+COPY packages/Webkul/Admin/package.json packages/Webkul/Admin/package.json
+COPY packages/Webkul/Shop/package.json packages/Webkul/Shop/package.json
+RUN cd packages/Webkul/Admin && npm install
+RUN cd packages/Webkul/Shop && npm install
 COPY . .
-RUN cd packages/Webkul/Admin && npm install && npm run build
-RUN cd packages/Webkul/Shop && npm install && npm run build
+RUN cd packages/Webkul/Admin && npm run build
+RUN cd packages/Webkul/Shop && npm run build
 
 # ---- Stage 2: runtime + Composer install (PHP-FPM, no Xdebug) ----
 # `composer install` deliberately runs INSIDE this stage, against the SAME
@@ -86,15 +121,83 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
-COPY --chown=www-data:www-data . .
-COPY --from=assets --chown=www-data:www-data /build/public/themes ./public/themes
-
+# TASK-OPS-019 (RISK_REGISTER.md R77): `composer.json`/`composer.lock` are
+# copied and `composer install` run BEFORE the rest of the source tree -
+# this is the expensive layer (~170+ third-party packages downloaded and
+# extracted, ~20-30s, confirmed directly from a real build's own
+# transcript) and it is now cached on those two files' content alone,
+# reused whenever a deploy doesn't touch dependencies at all (previously,
+# it re-ran from scratch on EVERY deploy, even ones that never touched
+# composer.lock - directly confirmed empirically during the real
+# TASK-MVP-017 production deployment, whose own build transcript showed a
+# full "Downloading... Package operations: 172 installs" sequence despite
+# composer.lock being byte-identical to the prior deploy).
+#
+# `--no-scripts`/`--no-autoloader` here are load-bearing, not incidental -
+# proven safe by directly reading composer.json/composer.lock AND by a
+# real local build failure this task's own implementation hit (not
+# guessed either way):
+#   - `composer.json`'s only `repositories` entry is a `path` repository
+#     (`packages/*/*`) - but `composer.lock` contains ZERO packages under
+#     that path (confirmed: `grep -c '"name": "webkul/' composer.lock` ->
+#     0), meaning nothing in the actual resolved dependency graph is ever
+#     satisfied from `packages/Webkul/*`/`packages/Platform/*` at all.
+#     Every `Webkul\*`/`Platform\*` namespace is wired ENTIRELY through
+#     this root composer.json's own plain `autoload.psr-4` map, a
+#     structurally separate mechanism from the (here, unused) path
+#     repository. This is why the vendor-package download/extract phase
+#     below needs nothing from `packages/` to succeed.
+#   - `--optimize-autoloader` (this project's existing, unchanged
+#     requirement) DOES need the full source tree: it builds a static
+#     classmap by scanning every PSR-4-mapped directory, including
+#     `packages/Webkul/*/src` and `packages/Platform/*/src`, which do not
+#     exist yet at this point in the build. `--no-autoloader` here defers
+#     that scan entirely to the second, cheap `composer dump-autoload`
+#     step below, once the full tree exists.
+#   - `composer.json`'s only script is `post-autoload-dump` -> `@php
+#     artisan package:discover --ansi` - and the ORIGINAL single-step
+#     `composer install --optimize-autoloader --no-scripts` this task
+#     replaces ALREADY passed `--no-scripts` (confirmed via `git show`
+#     against the committed original file - not assumed), meaning
+#     `artisan package:discover` has never once run during any production
+#     build in this project's history; the tracked `bootstrap/cache/
+#     .gitignore` (its only tracked file) proves `packages.php`/
+#     `services.php` were never committed either. An earlier draft of
+#     this split kept `--no-scripts` only on THIS first command and
+#     dropped it from the second `dump-autoload` call below, reasoning
+#     that reproducing `post-autoload-dump` there would be a no-op - that
+#     was wrong and caught by a real local build failure ("Please provide
+#     a valid cache path", `Illuminate\View\Compilers\Compiler` - package
+#     discovery eagerly resolves the Blade view compiler, which needs
+#     `storage/framework/views` to already be writable/configured, never
+#     true at build time in this project). The fix is to keep
+#     `--no-scripts` on BOTH commands, exactly preserving today's already-
+#     proven-working behavior - this split changes ONLY the timing of the
+#     vendor-download vs. classmap-generation work, never what scripts run.
+#   - `php-http/discovery` (the one enabled Composer PLUGIN,
+#     `config.allow-plugins`) is unaffected by `--no-scripts` - Composer
+#     plugins are a structurally different mechanism from `scripts` and
+#     are never disabled by that flag - so its own auto-discovery still
+#     runs normally in this first step, exactly as before.
+COPY composer.json composer.lock ./
 RUN composer install \
     --no-dev \
     --no-interaction \
     --no-progress \
-    --optimize-autoloader \
-    --no-scripts
+    --no-scripts \
+    --no-autoloader
+
+COPY --chown=www-data:www-data . .
+COPY --from=assets --chown=www-data:www-data /build/public/themes ./public/themes
+
+# The expensive vendor-package download/extract already happened above;
+# this is now just a fast classmap scan of the just-arrived source tree -
+# `--no-scripts` here matches the original single-step command exactly
+# (see this section's own docblock above for why that matters). It still
+# reruns every deploy (the full source only exists from this point on),
+# but costs seconds, not the ~20-30s+ full package-download step it used
+# to also silently repeat.
+RUN composer dump-autoload --optimize --no-dev --no-scripts
 
 COPY docker/production/php-production.ini /usr/local/etc/php/conf.d/zz-production.ini
 COPY docker/production/entrypoint.sh /usr/local/bin/entrypoint.sh
