@@ -31,11 +31,15 @@ use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Platform\Tenancy\Services\CentralDatabaseWipeGuard;
 use Platform\Tenancy\Services\TenantHostResolver;
+use Platform\Tenancy\Support\LocaleAwareCartRuleRepository;
+use Platform\Tenancy\Support\LocaleAwareCore;
 use Platform\Tenancy\Support\SalesDataGridTimezoneFormatter;
 use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
 use Stancl\Tenancy\Middleware;
+use Webkul\CartRule\Repositories\CartRuleRepository;
+use Webkul\Core\Core;
 
 class TenancyServiceProvider extends ServiceProvider
 {
@@ -155,7 +159,27 @@ class TenancyServiceProvider extends ServiceProvider
 
     public function register()
     {
-        //
+        $this->bindLocaleAwareCountryStateConsumers();
+    }
+
+    /**
+     * TASK-MVP-022 (RISK_REGISTER.md R74). See `LocaleAwareCore`/
+     * `LocaleAwareCartRuleRepository`/`LocaleAwareCountryStates`'s own
+     * docblocks for the full root-cause record. Plain `bind()`, never
+     * `singleton()`: neither `Core::class` nor `CartRuleRepository::class`
+     * has any upstream binding today (confirmed by direct search - both
+     * are auto-resolved via reflection), so the container already
+     * constructs a fresh instance per resolution; `bind()` substitutes
+     * these subclasses while preserving that exact fresh-resolution
+     * semantics, rather than introducing a new shared-instance behavior
+     * that was never true before this task. Registered in `register()`,
+     * not `boot()`, since this is a plain container binding with no
+     * dependency on any other provider having already booted.
+     */
+    protected function bindLocaleAwareCountryStateConsumers(): void
+    {
+        $this->app->bind(Core::class, LocaleAwareCore::class);
+        $this->app->bind(CartRuleRepository::class, LocaleAwareCartRuleRepository::class);
     }
 
     public function boot()
