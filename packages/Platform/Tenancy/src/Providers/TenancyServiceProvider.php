@@ -31,6 +31,7 @@ use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Platform\Tenancy\Services\CentralDatabaseWipeGuard;
 use Platform\Tenancy\Services\TenantHostResolver;
+use Platform\Tenancy\Support\SalesDataGridTimezoneFormatter;
 use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 use Stancl\Tenancy\Events;
 use Stancl\Tenancy\Listeners;
@@ -167,6 +168,7 @@ class TenancyServiceProvider extends ServiceProvider
         $this->handleUnresolvedTenantDomains();
         $this->preInitializeTenancyOnRouteMatch();
         $this->installCentralSafeExceptionHandler();
+        $this->installSalesDataGridTimezoneFormatting();
 
         // INCIDENT-001. Must run before any command's handle() executes -
         // every provider's boot() runs before the console Kernel dispatches
@@ -574,5 +576,16 @@ class TenancyServiceProvider extends ServiceProvider
             ExceptionHandler::class,
             fn ($handler) => new CentralSafeExceptionHandler($handler)
         );
+    }
+
+    /**
+     * TASK-MVP-020 (RISK_REGISTER.md R75). See `SalesDataGridTimezoneFormatter`'s
+     * own docblock for the full root-cause record, the fixed grid/column
+     * list, and why a Laravel event listener - not `Container::resolving()`
+     * - is the correct hook here.
+     */
+    protected function installSalesDataGridTimezoneFormatting(): void
+    {
+        SalesDataGridTimezoneFormatter::register();
     }
 }
