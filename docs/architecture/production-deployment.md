@@ -373,20 +373,35 @@ acquire the lock again itself, avoiding a self-deadlock. Verified with real
 `flock` in a Linux environment matching production (not merely reasoned
 about): both directions were directly tested.
 
-**Scheduled backstop, independent of `deploy.sh`.** `docker-disk-hygiene.sh`
-is also intended to run on its own daily schedule, so growth stays bounded
-even if `deploy.sh` itself is ever bypassed - the same "undocumented habit"
-failure mode R76/C92 already closed for the app+web-together problem,
-applied here to disk hygiene. **Production installation step** (not yet
-applied - see RISK_REGISTER.md R77's own closure criteria): add to the root
-crontab, in the same style as the existing backup jobs (`crontab -l` already
-shows those at 03:15-03:50) but at a different time and a dedicated log file
-- never mixed with `/opt/estore/backups/backup-run.log`:
+**Scheduled backstop, independent of `deploy.sh` - INSTALLED.** `docker-
+disk-hygiene.sh` also runs on its own daily schedule, so growth stays
+bounded even if `deploy.sh` itself is ever bypassed - the same
+"undocumented habit" failure mode R76/C92 already closed for the app+web-
+together problem, applied here to disk hygiene. Installed in root's
+crontab (`sudo crontab -e`, same style/privilege context as the existing
+backup jobs - `crontab -l` shows those at 03:15-03:50), at a different
+time and a dedicated log file, never mixed with `/opt/estore/backups/
+backup-run.log`, using the script's own canonical absolute path directly
+(no `cd`/`bash` wrapper needed - the script is executable with a correct
+shebang, and it resolves its own paths internally regardless of the
+caller's working directory):
 
 ```
-# TASK-OPS-019 - Docker disk hygiene backstop (04:00, independent of deploy.sh)
-0 4 * * * cd /opt/estore/app && /usr/bin/env bash docker/production/docker-disk-hygiene.sh >> /opt/estore/docker-hygiene.log 2>&1
+# TASK-OPS-019 - Docker disk hygiene backstop (04:00, after backup jobs finish at 03:50, independent of deploy.sh - see RISK_REGISTER.md R77)
+0 4 * * * /opt/estore/app/docker/production/docker-disk-hygiene.sh >> /opt/estore/docker-hygiene.log 2>&1
 ```
+
+**Log rotation - INSTALLED.** `/opt/estore/docker-hygiene.log` is bounded
+by a dedicated `/etc/logrotate.d/docker-disk-hygiene` config (weekly,
+8 rotations kept, compressed) - this project's real production host
+already runs `logrotate` daily via its own systemd timer (confirmed
+directly, not assumed), so this reuses existing, already-scheduled
+infrastructure rather than adding a new mechanism. No `copytruncate`/
+signal handling is needed: nothing holds the log file open persistently,
+each cron run simply appends via a fresh `>>` redirection. (The pre-
+existing `/opt/estore/backups/backup-run.log` has no rotation configured
+- a real, disclosed, pre-existing gap this task did not create and does
+not fix, since it is unrelated to this task's own scope.)
 
 **Rollback pair.** `estore-app:rollback`/`estore-web:rollback` (plus a
 `ROLLBACK_COMMIT` marker file at `/opt/estore/app/ROLLBACK_COMMIT`,
