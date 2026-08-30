@@ -84,6 +84,64 @@ real, monitored mailbox (or repointed to `support@technify.dev` via
 Email Settings -> Contact Email field) before depending on it for real
 customer support traffic.
 
+## Per-tenant sender identity (TASK-MVP-018, RISK_REGISTER.md R73)
+
+**A third, distinct identity: the actual `From:` name/address on every
+transactional email** (order confirmation, invoice, shipment, refund,
+cancellation, customer/Admin password reset) - separate from both the SMTP
+credentials above and the "Contact us" footer address. Every recipient of
+every one of these emails, for every tenant, used to see `From: Technify
+<support@technify.dev>` - the platform's own identity, never the merchant's.
+
+**Root cause, found by this task's own audit, not a missing feature**:
+`Webkul\Core\Core::getSenderEmailDetails()` (unmodified `packages/Webkul`)
+already reads a TENANT-scoped `core_config` row
+(`emails.configure.email_settings.sender_name`/`sender_email`, the same
+per-tenant-DB mechanism already proven isolated for SMTP above), falling
+back to `config('mail.from.name')`/`config('mail.from.address')` only when
+no row exists - and every Bagisto order/invoice/shipment/refund/cancellation
+Mailable plus the customer/Admin password-reset Notifications already
+consume it (`Shop\Mail\Mailable`/`Admin\Mail\Mailable::buildFrom()`, or an
+explicit `->from(core()->getSenderEmailDetails()...)` call). The row was
+simply never written by anything - populating it has always required a
+human to save Admin -> Configuration -> Emails -> Email Settings, which no
+tenant had ever done.
+
+**Fix: seed the row automatically, build no new send-time mechanism.**
+`Platform\Tenancy\Services\TenantProvisioner::seedSenderIdentity()` (new,
+idempotent, never overwrites an existing value) is called from
+`Platform\Signup\Services\MerchantOnboarding::attempt()` at the exact point
+a tenant's real store name first becomes known - Platform Admin's managed
+"Create Merchant" flow only; public `/join` and CLI (`tenant:provision`)
+provisioning pass no store name at all and are unaffected, an intentional,
+disclosed current limitation, not an oversight (revisit only if either path
+is given a real store-name field in a future task).
+
+**Model A only, explicit product decision (see DECISION_LOG.md C94): display
+NAME only, never the ADDRESS.** `sender_email` is never written by either
+the provisioning-time seed or the repair command below - `getSenderEmailDetails()`
+keeps falling back to `config('mail.from.address')`, i.e. the same
+already-proven-deliverable `support@technify.dev` documented above. No
+Reply-To is set anywhere in this task's scope (`owner_email` is unverified
+input). This was a deliberate choice, not an oversight: repository evidence
+does not establish whether Zoho's SMTP relay accepts a `From:` address other
+than the authenticated mailbox, and a merchant-owned domain's own
+SPF/DKIM/DMARC alignment is a real deliverability risk this project has no
+infrastructure to solve - both genuinely out of scope, not merely deferred.
+
+**Backfill for existing tenants**: `platform:tenants:repair-sender-identity`
+(`packages/Platform/Tenancy/src/Console/Commands/RepairSenderIdentity.php`)
+mirrors the existing `platform:tenants:repair-channel-hostname` precedent -
+a `--tenant` selector (all Ready tenants if omitted), Ready-only, safe to
+run repeatedly, never run automatically during deployment. It reads each
+tenant's own `channel_translations.name` as the store name to seed, but
+SKIPS a tenant whose channel name is still Bagisto's own generic seeded
+placeholder ("Default"/"افتراضي" - `Webkul\Installer\Database\Seeders\Core\
+ChannelTableSeeder`) rather than seeding a meaningless value, and NEVER
+overwrites a `sender_name` already configured (whether by a prior repair run
+or a real Admin -> Configuration save). Returns a non-zero exit code only
+for a genuine per-tenant failure, never for a normal skip.
+
 ## Secrets
 
 The Zoho Application-Specific Password is supplied as `MAIL_PASSWORD` via

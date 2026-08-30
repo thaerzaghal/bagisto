@@ -74,6 +74,16 @@ class MerchantOnboarding
      * ensureChannelHostnameCorrect()` already establishes for the sibling
      * `channels.hostname` correction, just for a cosmetic field that step
      * doesn't own.
+     *
+     * TASK-MVP-018 (RISK_REGISTER.md R73): the same `$storeName`, at the
+     * same point (only once provisioning has succeeded and the real value
+     * is known - never earlier), also seeds the tenant's mail sender
+     * DISPLAY NAME via `TenantProvisioner::seedSenderIdentity()` - see that
+     * method's own docblock for the full architecture. Public `/join` never
+     * passes `$storeName`, so its tenants are unaffected (existing
+     * "Technify" fallback unchanged) - an intentional, disclosed current
+     * limitation, not an oversight (see RepairSenderIdentity for the
+     * backfill path once a real store name becomes known).
      */
     public function register(string $slug, string $domain, string $ownerName, string $ownerEmail, string $password, ?Plan $plan = null, ?string $storeName = null): array
     {
@@ -132,6 +142,8 @@ class MerchantOnboarding
                     ->where('channel_id', 1)
                     ->update(['name' => $storeName]);
             });
+
+            $this->provisioner->seedSenderIdentity($tenant, $storeName);
         }
 
         return ['tenant' => $tenant->fresh(), 'succeeded' => true];

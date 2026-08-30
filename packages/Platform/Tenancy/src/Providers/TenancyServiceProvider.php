@@ -20,6 +20,7 @@ use Platform\Tenancy\Console\Commands\ProductionReadinessCheck;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
 use Platform\Tenancy\Console\Commands\RepairChannelHostname;
+use Platform\Tenancy\Console\Commands\RepairSenderIdentity;
 use Platform\Tenancy\Exceptions\CentralSafeExceptionHandler;
 use Platform\Tenancy\Exceptions\TenantNotReadyHttpException;
 use Platform\Tenancy\Http\Middleware\TenantAccessGate;
@@ -201,6 +202,7 @@ class TenancyServiceProvider extends ServiceProvider
                 MigrateCentral::class,
                 MigratePendingTenants::class,
                 RepairChannelHostname::class,
+                RepairSenderIdentity::class,
                 ProductionReadinessCheck::class,
             ]);
         }

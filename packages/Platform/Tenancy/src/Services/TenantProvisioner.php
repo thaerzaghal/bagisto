@@ -205,6 +205,105 @@ class TenantProvisioner
     }
 
     /**
+     * TASK-MVP-018 (RISK_REGISTER.md R73). Seeds the tenant-scoped mail
+     * sender DISPLAY NAME - `emails.configure.email_settings.sender_name`,
+     * a plain `core_config` row - with the tenant's own store name, so
+     * transactional email shows "From: <Store Name> <support@technify.dev>"
+     * instead of the platform's own "Technify" identity.
+     *
+     * ROOT CAUSE THIS CLOSES (confirmed by reading source, not assumed):
+     * `Webkul\Core\Core::getSenderEmailDetails()` already reads this exact
+     * tenant-scoped `core_config` field (falling back to
+     * `config('mail.from.name')` = "Technify" only when no row exists), and
+     * every Bagisto order/invoice/shipment/refund/cancellation Mailable
+     * plus the customer/Admin password-reset Notifications already consume
+     * it via `Shop\Mail\Mailable::buildFrom()` / `Admin\Mail\Mailable::
+     * buildFrom()` / explicit `->from(core()->getSenderEmailDetails()...)`
+     * calls - unmodified `packages/Webkul` code. The defect was never
+     * missing architecture, only a `core_config` row nothing had ever
+     * written, since populating it has always required a human to visit
+     * Admin -> Configuration -> Emails -> Email Settings and save the form.
+     *
+     * ADDRESS IS DELIBERATELY NEVER TOUCHED HERE (Model A, explicit product
+     * decision): only `sender_name` is written - `sender_email` is left
+     * completely alone, so `getSenderEmailDetails()` keeps falling back to
+     * `config('mail.from.address')` (`support@technify.dev`, the already-
+     * proven-deliverable central address - see docs/implementation/
+     * email-delivery.md). No merchant-controlled or arbitrary From address
+     * is ever introduced by this method, and no Reply-To is set anywhere in
+     * this task's scope - `owner_email` is unverified input and is
+     * deliberately not used here.
+     *
+     * SINGLE SOURCE OF TRUTH (this task's own explicit requirement): both
+     * `Platform\Signup\Services\MerchantOnboarding::attempt()` (the moment a
+     * NEW tenant's real store name first becomes known) and
+     * `Platform\Tenancy\Console\Commands\RepairSenderIdentity` (the backfill
+     * command for tenants provisioned before this method existed) call this
+     * exact method - neither has its own copy of the seed-or-skip logic.
+     * Trustworthiness of `$storeName` (e.g. rejecting Bagisto's own generic
+     * seeded placeholder channel name, "Default"/"افتراضي") is deliberately
+     * the CALLER's responsibility, not this method's - this is a pure,
+     * unopinionated "seed if absent" primitive, matching the callers'
+     * different needs (onboarding always has an operator-supplied name,
+     * trusted by definition; the repair command must inspect existing data
+     * and decide for itself what counts as trustworthy).
+     *
+     * IDEMPOTENT / NEVER OVERWRITES: a no-op (returns 'already_configured')
+     * if a `sender_name` row already exists for this tenant's default
+     * channel - whether seeded by an earlier call to this same method or
+     * manually configured by a merchant/admin through the real Admin
+     * Configuration UI. Safe to call any number of times.
+     *
+     * Nested `Tenant::run()` calls (this method always calls its own,
+     * regardless of whether the caller is already inside one) are safe by
+     * construction - confirmed by reading `Stancl\Tenancy\Database\
+     * Concerns\TenantRun::run()` directly: it captures `tenant()` as the
+     * "original" tenant BEFORE switching, so a nested call re-initializes
+     * the SAME tenant and correctly restores to it afterward, never ending
+     * tenancy early the way a naive nested-lock implementation might.
+     *
+     * @return 'seeded'|'already_configured'|'blank'
+     */
+    public function seedSenderIdentity(Tenant $tenant, string $storeName): string
+    {
+        $storeName = trim($storeName);
+
+        if ($storeName === '') {
+            return 'blank';
+        }
+
+        return $tenant->run(function () use ($storeName) {
+            if (! Schema::hasTable('core_config') || ! Schema::hasTable('channels')) {
+                throw new RuntimeException(
+                    'Cannot seed sender identity: core_config/channels table does not exist yet (seeding step did not complete as expected).'
+                );
+            }
+
+            $channelCode = DB::table('channels')->where('id', 1)->value('code');
+
+            $exists = DB::table('core_config')
+                ->where('code', 'emails.configure.email_settings.sender_name')
+                ->where('channel_code', $channelCode)
+                ->exists();
+
+            if ($exists) {
+                return 'already_configured';
+            }
+
+            DB::table('core_config')->insert([
+                'code' => 'emails.configure.email_settings.sender_name',
+                'value' => $storeName,
+                'channel_code' => $channelCode,
+                'locale_code' => null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            return 'seeded';
+        });
+    }
+
+    /**
      * Step 3: run every Bagisto package migration (discovered dynamically,
      * not a maintained list - see docs/architecture/provisioning.md "Bagisto
      * tenant migration strategy") plus anything under database/migrations/tenant,
