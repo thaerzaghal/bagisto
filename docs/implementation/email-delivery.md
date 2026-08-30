@@ -84,7 +84,7 @@ real, monitored mailbox (or repointed to `support@technify.dev` via
 Email Settings -> Contact Email field) before depending on it for real
 customer support traffic.
 
-## Per-tenant sender identity (TASK-MVP-018, RISK_REGISTER.md R73)
+## Per-tenant sender identity (TASK-MVP-018, RISK_REGISTER.md R73 - CLOSED)
 
 **A third, distinct identity: the actual `From:` name/address on every
 transactional email** (order confirmation, invoice, shipment, refund,
@@ -92,6 +92,12 @@ cancellation, customer/Admin password reset) - separate from both the SMTP
 credentials above and the "Contact us" footer address. Every recipient of
 every one of these emails, for every tenant, used to see `From: Technify
 <support@technify.dev>` - the platform's own identity, never the merchant's.
+**Fixed and production-verified end-to-end**: transactional mail now shows
+`From: <Tenant Store Name> <support@technify.dev>` - a real Admin
+password-reset email was independently, externally verified in a real Gmail
+inbox showing exactly that, replacing the earlier `Technify` message (see
+"Production regression" below for the full story, including a second bug
+this fix itself needed).
 
 **Root cause, found by this task's own audit, not a missing feature**:
 `Webkul\Core\Core::getSenderEmailDetails()` (unmodified `packages/Webkul`)
@@ -156,20 +162,26 @@ fallback) before being seeded stayed stale indefinitely. Fixed:
 the same method `Webkul\Admin\Http\Controllers\ConfigurationController::
 store()` already uses for every real Admin Configuration save - so the same
 cache-invalidating event fires. The pre-existing raw-DB existence check is
-unchanged (reads never need invalidation, only writes do).
+unchanged (reads never need invalidation, only writes do). **Rule going
+forward (DECISION_LOG.md C95): any future write to a `core_config` field also
+read through `CoreConfigRepository` must go through that repository's own
+`create()`/`update()`, never a raw `DB::table()` insert/update - a real,
+disclosed, still-open follow-up is that TASK-MVP-016's own pre-existing raw
+`core_config` writes (Palestine postcode/payment defaults) were not
+retroactively fixed by this task and could suffer the identical staleness.**
 
-**One-time production cache invalidation still required for
-`palestine-mvp-check` specifically** (documented here, not yet executed): its
-`core_config` row already exists from the original (buggy) repair run, so the
-fixed write path's own idempotency guard will correctly SKIP re-writing it -
-meaning redeploying the fix alone does not retroactively clear its already-
-stale cache entry. The exact supported mechanism - the same one Bagisto's own
-`Webkul\Core\Listeners\CleanCacheRepository` uses internally when a real
-`RepositoryEntityCreated`/`Updated` event fires, invoked directly here since
-no such event exists to dispatch for an already-correct row - run inside that
-tenant's own context so only its own tracked key list (`storage_path()` is
-tenant-suffixed, so `repository-cache-keys.json` is itself per-tenant) is
-touched:
+**One-time production cache invalidation for `palestine-mvp-check` -
+EXECUTED.** Its `core_config` row already existed from the original (buggy)
+repair run, so the fixed write path's own idempotency guard correctly SKIPPED
+re-writing it - redeploying the fix alone did not retroactively clear its
+already-stale cache entry. The exact supported mechanism - the same one
+Bagisto's own `Webkul\Core\Listeners\CleanCacheRepository` uses internally
+when a real `RepositoryEntityCreated`/`Updated` event fires, invoked directly
+here since no such event exists to dispatch for an already-correct row - was
+run inside that tenant's own context so only its own tracked key list
+(`storage_path()` is tenant-suffixed, so `repository-cache-keys.json` is
+itself per-tenant) was touched: **171 tracked `CoreConfigRepository` keys
+forgotten**, no DB row touched, no `cache:clear`, no Redis flush:
 
 ```php
 // php artisan tinker (production), or an equivalent one-off script:
@@ -185,19 +197,20 @@ $tenant->run(function () {
 });
 ```
 
-No DB row is touched, no arbitrary value is written to trigger a fake event,
-no `php artisan cache:clear` (which would flush every cache key on the
-server, not just this repository's), and no wildcard Redis command. **Blast
-radius**: scoped to whatever cache keys `palestine-mvp-check`'s own reads
-have generated for `CoreConfigRepository` (tracked in that tenant's own
+No DB row was touched, no arbitrary value was written to trigger a fake
+event, no `php artisan cache:clear` (which would flush every cache key on the
+server, not just this repository's), and no wildcard Redis command was used.
+**Blast radius**: scoped to whatever cache keys `palestine-mvp-check`'s own
+reads had generated for `CoreConfigRepository` (tracked in that tenant's own
 suffixed `storage_path()`, not a shared cross-tenant file) - cache-only, no
-tenant data is mutated. A narrow, low-probability residual: if a different
-tenant's `CoreConfigRepository` read happened to produce an identical MD5
-cache-key hash (possible only via `request()->fullUrl()` collisions in a
-CLI/console context, not from any real per-tenant HTTP request), that
-tenant's equivalent cached entry would also be cleared - never its real data,
-only a cache entry it would recompute correctly on its next read regardless.
-Not executed as part of this checkpoint.
+tenant data was mutated; the untouched `mvp007-check` tenant was independently
+confirmed unaffected. Immediately after invalidation,
+`core()->getSenderEmailDetails()` returned `{'name': 'Palestine MVP Check
+Store', 'email': 'support@technify.dev'}` live in production, and a real
+Admin password-reset email sent through the genuine Zoho SMTP path was
+independently, externally verified in the real Gmail inbox: `From: Palestine
+MVP Check Store <support@technify.dev>`, delivered 2026-08-30 13:24:37 UTC -
+the first real end-to-end proof of this fix.
 
 ## Secrets
 
