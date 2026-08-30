@@ -22,6 +22,7 @@
  * StoreReadinessTest.php) conventions exactly.
  */
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Platform\Tenancy\Enums\TenantStatus;
@@ -30,10 +31,31 @@ use Platform\Tenancy\Services\TenantProvisioner;
 use Platform\Tenancy\Support\PalestineGovernorates;
 use Tests\Feature\Platform\PlatformIntegrationTestCase;
 use Tests\TestCase;
+use Webkul\Payment\Payment\CashOnDelivery;
+use Webkul\Payment\Payment\MoneyTransfer;
 use Webkul\Product\Models\Product;
 use Webkul\Product\Repositories\ProductRepository;
 
 uses(PlatformIntegrationTestCase::class);
+
+/**
+ * TASK-MVP-019 (DECISION_LOG.md C95, direct successor to R73/TASK-MVP-018).
+ * `ensurePalestineAddressDefaultsSeeded()`/`ensurePalestinePaymentDefaultsSeeded()`
+ * are `protected` - reached only through `TenantProvisioner::provision()`,
+ * which is a no-op for an already-Ready tenant (no repair/backfill command
+ * exists for these steps, unlike `seedSenderIdentity()`/`RepairSenderIdentity`).
+ * Reflection is the narrowest way to invoke one step in isolation to
+ * reproduce the exact real-world "read before seed" ordering C95 identified
+ * - it changes nothing about the production API surface, and is used only
+ * by this file's own new Section I tests below.
+ */
+function invokeProtectedProvisionerStep(string $method, Tenant $tenant): void
+{
+    $provisioner = app(TenantProvisioner::class);
+    $ref = new ReflectionMethod($provisioner, $method);
+    $ref->setAccessible(true);
+    $ref->invoke($provisioner, $tenant);
+}
 
 function loginAsTpdTenantAdmin(TestCase $test, string $domain, string $email = 'admin@example.com', string $password = 'admin123'): void
 {
@@ -440,4 +462,140 @@ test('14. the Palestine-first storefront homepage still renders Arabic/RTL corre
     $response->assertOk();
     $response->assertSee('lang="ar"', false);
     $response->assertSee('dir="rtl"', false);
+});
+
+// --- I. Cache safety (TASK-MVP-019, DECISION_LOG.md C95) ----------------------
+
+test('15. a repository-cached postcode-requirement read BEFORE seeding is correctly invalidated by the write path', function () {
+    $tenant = provisionTpdTenant('tpd-a');
+
+    // Simulate the real-world C95 trigger: a tenant whose postcode
+    // requirement was never seeded (matching a tenant that predates this
+    // step, or - as here - one this test deliberately resets), still
+    // otherwise Ready.
+    $tenant->run(fn () => DB::table('core_config')
+        ->where('code', 'customer.address.requirements.postcode')
+        ->delete());
+
+    Cache::flush();
+
+    // Read FIRST through the real cached Bagisto path - Core::isPostCodeRequired()
+    // -> getConfigData() -> CoreConfigRepository - priming the no-row
+    // fallback (Bagisto's own schema default: postcode required).
+    $before = $tenant->run(fn () => core()->isPostCodeRequired());
+    expect($before)->toBeTrue();
+
+    invokeProtectedProvisionerStep('ensurePalestineAddressDefaultsSeeded', $tenant);
+
+    // Read again, no manual cache-clear - must see the freshly-seeded
+    // value, not the cached fallback. Fails against the original raw
+    // DB::table()->insert() implementation; passes against the
+    // CoreConfigRepository::create()-based fix.
+    $after = $tenant->run(fn () => core()->isPostCodeRequired());
+    expect($after)->toBeFalse();
+});
+
+test('16. repository-cached payment-method reads BEFORE seeding are correctly invalidated by the write path', function () {
+    $tenant = provisionTpdTenant('tpd-a');
+
+    $tenant->run(fn () => DB::table('core_config')
+        ->where('code', 'like', 'sales.payment_methods.%')
+        ->delete());
+
+    Cache::flush();
+
+    // Read FIRST through the real cached Bagisto path -
+    // Webkul\Payment\Payment\Payment::getConfigData()/getTitle() (the same
+    // chain isAvailable()/getTitle() themselves call) - priming the
+    // no-row fallback (Webkul\Payment\Config\payment-methods.php: both
+    // methods active, generic English "Cash On Delivery" title, not
+    // locale-aware). CashOnDelivery's OWN isAvailable() override
+    // additionally gates on an active cart's stockable items
+    // ($this->cart?->hasOnlyStockableItems()) - real business logic
+    // unrelated to config caching, deliberately not exercised here so
+    // this test isolates the cache-invalidation property alone; the
+    // Money Transfer assertions below still exercise the unmodified
+    // isAvailable() (no cart dependency in that class).
+    // Cast to bool explicitly: getConfigData() returns the RAW stored
+    // value - a native PHP bool from the Laravel config fallback before
+    // seeding, but the literal '1'/'0' string core_config always stores
+    // after seeding (matching this method's own original raw-insert
+    // shape) - real Bagisto call sites (e.g. CashOnDelivery::isAvailable()'s
+    // own `&&` usage) rely on PHP's own truthy/falsy coercion for this,
+    // never a strict === true/false comparison, so the cast here matches
+    // real application behavior rather than working around it.
+    $beforeCod = $tenant->run(fn () => (bool) app(CashOnDelivery::class)->getConfigData('active'));
+    $beforeMoney = $tenant->run(fn () => (bool) app(MoneyTransfer::class)->isAvailable());
+    $beforeTitleAr = $tenant->run(fn () => core()->getConfigData('sales.payment_methods.cashondelivery.title', null, 'ar'));
+    $beforeTitleEn = $tenant->run(fn () => core()->getConfigData('sales.payment_methods.cashondelivery.title', null, 'en'));
+
+    expect($beforeCod)->toBeTrue();
+    expect($beforeMoney)->toBeTrue();
+    expect($beforeTitleAr)->toBe('Cash On Delivery');
+    expect($beforeTitleEn)->toBe('Cash On Delivery');
+
+    invokeProtectedProvisionerStep('ensurePalestinePaymentDefaultsSeeded', $tenant);
+
+    // Read again, no manual cache-clear. Money Transfer's active flag
+    // (true -> false) and both real titles are the meaningful regression
+    // signals - Cash on Delivery's own active flag stays true either way
+    // (redundant with the stock default), matching this method's own
+    // documented nuance. Fails against the original raw insert
+    // implementation; passes against the CoreConfigRepository::create()
+    // -based fix.
+    $afterCod = $tenant->run(fn () => (bool) app(CashOnDelivery::class)->getConfigData('active'));
+    $afterMoney = $tenant->run(fn () => (bool) app(MoneyTransfer::class)->isAvailable());
+    $afterTitleAr = $tenant->run(fn () => core()->getConfigData('sales.payment_methods.cashondelivery.title', null, 'ar'));
+    $afterTitleEn = $tenant->run(fn () => core()->getConfigData('sales.payment_methods.cashondelivery.title', null, 'en'));
+
+    expect($afterCod)->toBeTrue();
+    expect($afterMoney)->toBeFalse();
+    expect($afterTitleAr)->toBe('الدفع عند الاستلام');
+    expect($afterTitleEn)->toBe('Cash on Delivery');
+});
+
+test('17. an already-configured postcode requirement is never overwritten by a repeated seed call', function () {
+    $tenant = provisionTpdTenant('tpd-a');
+
+    $channelCode = $tenant->run(fn () => DB::table('channels')->where('id', 1)->value('code'));
+
+    // Simulate a real merchant/admin having manually configured this
+    // field to something other than TASK-MVP-016's own default.
+    $tenant->run(fn () => DB::table('core_config')
+        ->where('code', 'customer.address.requirements.postcode')
+        ->where('channel_code', $channelCode)
+        ->update(['value' => '1']));
+
+    invokeProtectedProvisionerStep('ensurePalestineAddressDefaultsSeeded', $tenant);
+
+    $value = $tenant->run(fn () => DB::table('core_config')
+        ->where('code', 'customer.address.requirements.postcode')
+        ->where('channel_code', $channelCode)
+        ->value('value'));
+
+    expect($value)->toBe('1');
+});
+
+test('18. already-configured payment defaults are never overwritten by a repeated seed call', function () {
+    $tenant = provisionTpdTenant('tpd-a');
+
+    $channelCode = $tenant->run(fn () => DB::table('channels')->where('id', 1)->value('code'));
+
+    // Simulate a real merchant/admin having manually reconfigured these
+    // fields away from TASK-MVP-016's own defaults.
+    $tenant->run(function () use ($channelCode) {
+        DB::table('core_config')->where('code', 'sales.payment_methods.cashondelivery.active')->where('channel_code', $channelCode)->update(['value' => '0']);
+        DB::table('core_config')->where('code', 'sales.payment_methods.moneytransfer.active')->where('channel_code', $channelCode)->update(['value' => '1']);
+        DB::table('core_config')->where('code', 'sales.payment_methods.cashondelivery.title')->where('channel_code', $channelCode)->where('locale_code', 'ar')->update(['value' => 'دفع مخصص']);
+        DB::table('core_config')->where('code', 'sales.payment_methods.cashondelivery.title')->where('channel_code', $channelCode)->where('locale_code', 'en')->update(['value' => 'Custom Title']);
+    });
+
+    invokeProtectedProvisionerStep('ensurePalestinePaymentDefaultsSeeded', $tenant);
+
+    $tenant->run(function () use ($channelCode) {
+        expect(DB::table('core_config')->where('code', 'sales.payment_methods.cashondelivery.active')->where('channel_code', $channelCode)->value('value'))->toBe('0');
+        expect(DB::table('core_config')->where('code', 'sales.payment_methods.moneytransfer.active')->where('channel_code', $channelCode)->value('value'))->toBe('1');
+        expect(DB::table('core_config')->where('code', 'sales.payment_methods.cashondelivery.title')->where('channel_code', $channelCode)->where('locale_code', 'ar')->value('value'))->toBe('دفع مخصص');
+        expect(DB::table('core_config')->where('code', 'sales.payment_methods.cashondelivery.title')->where('channel_code', $channelCode)->where('locale_code', 'en')->value('value'))->toBe('Custom Title');
+    });
 });

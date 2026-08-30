@@ -793,13 +793,7 @@ class TenantProvisioner
 
     /**
      * TASK-MVP-016. Two Palestine-first address defaults, both operator-
-     * approved, both written as plain `core_config` rows in exactly the
-     * shape `Webkul\Core\Repositories\CoreConfigRepository::create()`
-     * itself would produce (confirmed by reading that class directly) -
-     * a raw `DB::table('core_config')` write, not a call into that
-     * repository, matching this class's own established "narrow, known-
-     * shape write, no Webkul Eloquent/Repository dependency" convention
-     * (`ensureOwnerAdminSeeded()`, `ensureChannelHostnameCorrect()`):
+     * approved:
      *
      * 1. `customer.address.requirements.postcode` -> `0` (OFF). Palestine
      *    has no nationwide postal-code system in common use - confirmed
@@ -818,7 +812,26 @@ class TenantProvisioner
      *    meaningful, not a blocker (see that method's own docblock for
      *    the storefront free-text/dropdown behavior either way).
      *
-     * IDEMPOTENT: guarded by `channel_code`, safe to call again.
+     * TASK-MVP-019 (RISK_REGISTER.md/DECISION_LOG.md C95, direct successor
+     * to R73/C95): writes through `Webkul\Core\Repositories\
+     * CoreConfigRepository::create()` - the same write path
+     * `Webkul\Admin\Http\Controllers\ConfigurationController::store()`
+     * already uses for every real Admin Configuration save - instead of a
+     * raw `DB::table('core_config')->insert()`. `postcode` is read via
+     * `Core::isPostCodeRequired()` -> `Core::getConfigData()` ->
+     * `CoreConfigRepository` (confirmed by reading `Webkul\Core\Core.php`
+     * directly), the same Prettus-cached repository R73 (TASK-MVP-018) already proved
+     * a raw insert never invalidates - this was a confirmed architectural
+     * defect (no current production mismatch observed at the time of that
+     * audit, since no code path reads this field before this step runs for
+     * any real tenant) fixed here as ordinary hardening, not incident
+     * remediation. The pre-existing raw-DB existence check is UNCHANGED:
+     * reads never need cache invalidation, only writes do.
+     *
+     * IDEMPOTENT: guarded by `channel_code`, safe to call again - a no-op
+     * if the row already exists, whether seeded by an earlier call or a
+     * real Admin Configuration save; never overwrites merchant
+     * configuration.
      */
     protected function ensurePalestineAddressDefaultsSeeded(Tenant $tenant): void
     {
@@ -840,13 +853,16 @@ class TenantProvisioner
                 return;
             }
 
-            DB::table('core_config')->insert([
-                'code' => 'customer.address.requirements.postcode',
-                'value' => '0',
-                'channel_code' => $channelCode,
-                'locale_code' => null,
-                'created_at' => now(),
-                'updated_at' => now(),
+            app(CoreConfigRepository::class)->create([
+                'locale' => null,
+                'channel' => $channelCode,
+                'customer' => [
+                    'address' => [
+                        'requirements' => [
+                            'postcode' => '0',
+                        ],
+                    ],
+                ],
             ]);
         });
     }
@@ -890,10 +906,41 @@ class TenantProvisioner
      *
      * Writes `active` (channel-based only) for both methods and `title`
      * (channel- AND locale-based, one row per tenant locale - `ar`/`en`)
-     * for Cash on Delivery only, as plain `core_config` rows, the same
-     * shape/convention as `ensurePalestineAddressDefaultsSeeded()` above.
+     * for Cash on Delivery only.
      *
-     * IDEMPOTENT: guarded by existence of the cashondelivery `active` row.
+     * TASK-MVP-019 (RISK_REGISTER.md/DECISION_LOG.md C95, direct successor
+     * to R73/C95): writes through `Webkul\Core\Repositories\
+     * CoreConfigRepository::create()` instead of a raw
+     * `DB::table('core_config')->insert()` - the exact same write path
+     * `Webkul\Admin\Http\Controllers\ConfigurationController::store()`
+     * already uses for a real Admin Configuration save. All four fields
+     * are read via `Webkul\Payment\Payment\Payment::isAvailable()`/
+     * `getTitle()` -> `getConfigData()` -> `core()->getConfigData(
+     * 'sales.payment_methods.'.$code.'.'.$field)` (confirmed by reading
+     * that class directly) - the identical Prettus-cached
+     * `CoreConfigRepository` R73 (TASK-MVP-018) already proved a raw
+     * insert never invalidates. Confirmed architectural defect, no
+     * current production mismatch observed at the time of that audit (no
+     * code path reads any of these fields before this step runs for any
+     * real tenant); fixed here as ordinary hardening, not incident
+     * remediation.
+     *
+     * `CoreConfigRepository::create()` processes exactly ONE `'locale'`
+     * per call, so the Arabic and English `cashondelivery.title` rows
+     * need two separate calls - the three channel-based-only fields
+     * (`cashondelivery.active`, `moneytransfer.active`, plus the Arabic
+     * `title`) are written together in the first call (a field that is
+     * not `locale_based` ignores whatever `'locale'` value the call
+     * carries and always writes `locale_code = null`, confirmed by
+     * reading `CoreConfigRepository::create()`'s own per-field branching
+     * directly - so mixing them with the Arabic title in one call is
+     * safe and produces byte-identical rows to the original raw insert).
+     *
+     * IDEMPOTENT: guarded by existence of the cashondelivery `active` row
+     * - a no-op if it already exists, whether seeded by an earlier call
+     * or a real Admin Configuration save; never overwrites merchant
+     * configuration. The pre-existing raw-DB existence check is
+     * UNCHANGED: reads never need cache invalidation, only writes do.
      */
     protected function ensurePalestinePaymentDefaultsSeeded(Tenant $tenant): void
     {
@@ -915,40 +962,33 @@ class TenantProvisioner
                 return;
             }
 
-            $now = now();
+            $repository = app(CoreConfigRepository::class);
 
-            DB::table('core_config')->insert([
-                [
-                    'code' => 'sales.payment_methods.cashondelivery.active',
-                    'value' => '1',
-                    'channel_code' => $channelCode,
-                    'locale_code' => null,
-                    'created_at' => $now,
-                    'updated_at' => $now,
+            $repository->create([
+                'locale' => 'ar',
+                'channel' => $channelCode,
+                'sales' => [
+                    'payment_methods' => [
+                        'cashondelivery' => [
+                            'active' => '1',
+                            'title' => 'الدفع عند الاستلام',
+                        ],
+                        'moneytransfer' => [
+                            'active' => '0',
+                        ],
+                    ],
                 ],
-                [
-                    'code' => 'sales.payment_methods.cashondelivery.title',
-                    'value' => 'الدفع عند الاستلام',
-                    'channel_code' => $channelCode,
-                    'locale_code' => 'ar',
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ],
-                [
-                    'code' => 'sales.payment_methods.moneytransfer.active',
-                    'value' => '0',
-                    'channel_code' => $channelCode,
-                    'locale_code' => null,
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ],
-                [
-                    'code' => 'sales.payment_methods.cashondelivery.title',
-                    'value' => 'Cash on Delivery',
-                    'channel_code' => $channelCode,
-                    'locale_code' => 'en',
-                    'created_at' => $now,
-                    'updated_at' => $now,
+            ]);
+
+            $repository->create([
+                'locale' => 'en',
+                'channel' => $channelCode,
+                'sales' => [
+                    'payment_methods' => [
+                        'cashondelivery' => [
+                            'title' => 'Cash on Delivery',
+                        ],
+                    ],
                 ],
             ]);
         });
