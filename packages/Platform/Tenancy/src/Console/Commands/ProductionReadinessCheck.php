@@ -7,6 +7,8 @@ namespace Platform\Tenancy\Console\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Redis;
+use Platform\Tenancy\Support\ReadinessCheckResult;
+use Platform\Tenancy\Support\ReadinessStatus;
 use Throwable;
 
 /**
@@ -31,13 +33,54 @@ class ProductionReadinessCheck extends Command
 
     protected $description = 'Read-only report of obvious production-configuration issues (APP_DEBUG, trusted proxies, cache/session/response-cache posture, DB provisioning credentials, Redis reachability, mail/Stripe posture, app/web static-asset consistency). Mutates nothing.';
 
-    protected int $failures = 0;
-
-    protected int $warnings = 0;
-
     public function handle(): int
     {
-        $rows = [
+        $results = $this->collectResults();
+
+        $this->table(['Check', 'Status', 'Detail'], array_map(
+            fn (ReadinessCheckResult $result): array => $result->toTableRow(),
+            $results
+        ));
+
+        $failures = $this->countByStatus($results, ReadinessStatus::Fail);
+        $warnings = $this->countByStatus($results, ReadinessStatus::Warn);
+
+        if ($failures > 0) {
+            $this->error("{$failures} check(s) failed, {$warnings} warning(s).");
+
+            return self::FAILURE;
+        }
+
+        $this->info("All checks passed ({$warnings} warning(s)).");
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * TASK-OPS-MONITORING-001. The full, structured result set every
+     * `platform:production:check` run produces - `handle()`'s own console
+     * rendering above is now just ONE consumer of this list, alongside
+     * `Platform\Tenancy\Services\ProductionMonitorRunner` (`platform:
+     * production:monitor`). Deliberately a plain, stateless method with no
+     * side effects and no instance-level counters: every prior version of
+     * this class tracked `$failures`/`$warnings` as MUTATED INSTANCE
+     * PROPERTIES incremented inside `resultWarn()`/`resultFail()` - safe
+     * for a single `handle()` call, but a real, avoidable risk the moment
+     * anything else (a monitor, a test, a future caller) resolves this
+     * class once and calls it more than once, since Laravel does not
+     * guarantee a fresh instance across repeated `Artisan::call()`s in the
+     * same process. `collectResults()`/`resultPass()`/`resultWarn()`/
+     * `resultFail()`/`resultInfo()` are now pure - the failure/warning
+     * COUNT is derived fresh from the returned array on every call
+     * (`countByStatus()` below), so repeated invocations - from the
+     * console, from the monitor, from a test loop - can never retain or
+     * leak stale state from a prior call.
+     *
+     * @return array<int, ReadinessCheckResult>
+     */
+    public function collectResults(): array
+    {
+        return [
             $this->checkAppDebug(),
             $this->checkTrustedProxies(),
             $this->checkPlatformBaseDomain(),
@@ -58,22 +101,15 @@ class ProductionReadinessCheck extends Command
             $this->checkBackupHealth(),
             $this->checkOffsiteBackupHealth(),
         ];
-
-        $this->table(['Check', 'Status', 'Detail'], $rows);
-
-        if ($this->failures > 0) {
-            $this->error("{$this->failures} check(s) failed, {$this->warnings} warning(s).");
-
-            return self::FAILURE;
-        }
-
-        $this->info("All checks passed ({$this->warnings} warning(s)).");
-
-        return self::SUCCESS;
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkAppDebug(): array
+    /** @param array<int, ReadinessCheckResult> $results */
+    private function countByStatus(array $results, ReadinessStatus $status): int
+    {
+        return count(array_filter($results, fn (ReadinessCheckResult $result): bool => $result->status === $status));
+    }
+
+    protected function checkAppDebug(): ReadinessCheckResult
     {
         if (config('app.debug') === true) {
             return $this->resultFail('APP_DEBUG', 'true - MUST be false in production (leaks stack traces/secrets on error pages).');
@@ -82,8 +118,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('APP_DEBUG', 'false');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkTrustedProxies(): array
+    protected function checkTrustedProxies(): ReadinessCheckResult
     {
         if ((string) env('TRUSTED_PROXIES', '') === '') {
             return $this->resultWarn('TRUSTED_PROXIES', 'unset - trusting ALL proxies ("*"). Acceptable for local development only; production MUST set this to the real reverse proxy\'s IP(s)/CIDR range(s).');
@@ -92,8 +127,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('TRUSTED_PROXIES', 'configured');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkPlatformBaseDomain(): array
+    protected function checkPlatformBaseDomain(): ReadinessCheckResult
     {
         $value = (string) config('platform.base_domain');
 
@@ -104,8 +138,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('PLATFORM_BASE_DOMAIN', $value);
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkPlatformCentralDomains(): array
+    protected function checkPlatformCentralDomains(): ReadinessCheckResult
     {
         $domains = (array) config('tenancy.central_domains');
 
@@ -116,8 +149,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('PLATFORM_CENTRAL_DOMAINS', implode(', ', $domains));
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkCacheStore(): array
+    protected function checkCacheStore(): ReadinessCheckResult
     {
         $store = (string) config('cache.default');
 
@@ -128,8 +160,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('CACHE_STORE', 'redis');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkSessionDriver(): array
+    protected function checkSessionDriver(): ReadinessCheckResult
     {
         $driver = (string) config('session.driver');
 
@@ -140,8 +171,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('SESSION_DRIVER', 'database');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkResponseCache(): array
+    protected function checkResponseCache(): ReadinessCheckResult
     {
         if (config('responsecache.enabled') === true) {
             return $this->resultFail('RESPONSE_CACHE_ENABLED', 'true - MUST remain false (RISK_REGISTER.md R1: no tenant-scoped cache keys exist for this mechanism yet).');
@@ -150,8 +180,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('RESPONSE_CACHE_ENABLED', 'false');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkProvisioningCredentials(): array
+    protected function checkProvisioningCredentials(): ReadinessCheckResult
     {
         $username = (string) config('database.connections.tenant_provisioning.username');
 
@@ -181,10 +210,8 @@ class ProductionReadinessCheck extends Command
      * not a WARN - because this specific value has a KNOWN, already-proven
      * correct answer; there is no legitimate reason for it to ever be `true`
      * in this project.
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkAssetHelperTenancy(): array
+    protected function checkAssetHelperTenancy(): ReadinessCheckResult
     {
         if (config('tenancy.filesystem.asset_helper_tenancy') !== false) {
             return $this->resultFail('asset_helper_tenancy', 'is NOT false - this WILL break tenant Admin/Storefront asset loading entirely (RISK_REGISTER.md R63/R65). Set config/tenancy.php\'s filesystem.asset_helper_tenancy to false and redeploy from the approved git source.');
@@ -209,10 +236,8 @@ class ProductionReadinessCheck extends Command
      * commit marker was set at all. `checkAssetHelperTenancy()` above is the
      * concrete, self-verifying safeguard; this row is the general-purpose
      * "what am I actually running" visibility improvement.
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkDeployedSource(): array
+    protected function checkDeployedSource(): ReadinessCheckResult
     {
         $marker = base_path('APP_COMMIT');
 
@@ -317,16 +342,13 @@ class ProductionReadinessCheck extends Command
      * because they simply have no `manifest.json` on disk at all (the
      * INFO branch above) - there was never a real need for a second,
      * separate "unreachable" escape hatch once that was understood.
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkAdminStaticAssets(): array
+    protected function checkAdminStaticAssets(): ReadinessCheckResult
     {
         return $this->checkThemeStaticAssets('Admin static assets', 'themes/admin/default/build');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkShopStaticAssets(): array
+    protected function checkShopStaticAssets(): ReadinessCheckResult
     {
         return $this->checkThemeStaticAssets('Shop static assets', 'themes/shop/default/build');
     }
@@ -336,10 +358,8 @@ class ProductionReadinessCheck extends Command
      * for the full algorithm/rationale. Deliberately private to this class,
      * not a reusable service - this is a narrow, one-purpose diagnostic,
      * not a general asset-management abstraction.
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    private function checkThemeStaticAssets(string $label, string $buildDirectory): array
+    private function checkThemeStaticAssets(string $label, string $buildDirectory): ReadinessCheckResult
     {
         $manifestPath = public_path("{$buildDirectory}/manifest.json");
 
@@ -426,10 +446,8 @@ class ProductionReadinessCheck extends Command
      * that state; public signup would fail unpredictably for every real
      * merchant the moment `TurnstileVerifier` tries to verify against an
      * empty secret.
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkSignupAbuseProtection(): array
+    protected function checkSignupAbuseProtection(): ReadinessCheckResult
     {
         if (! config('platform.signup.turnstile.enabled')) {
             return $this->resultWarn('Signup abuse protection', 'Turnstile disabled - acceptable for an invited-only pilot; required before opening public self-service signup.');
@@ -460,10 +478,8 @@ class ProductionReadinessCheck extends Command
      * same helper `checkSignupAbuseProtection()` uses, so if public signup
      * is ever enabled with Turnstile disabled or misconfigured, this row
      * FAILS clearly instead of silently passing.
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkPublicSignup(): array
+    protected function checkPublicSignup(): ReadinessCheckResult
     {
         if (! config('platform.signup.enabled')) {
             return $this->resultPass('Public signup', 'disabled (managed onboarding) - merchants are onboarded via Platform Admin. See docs/architecture/onboarding.md.');
@@ -505,8 +521,7 @@ class ProductionReadinessCheck extends Command
         return [true, 'Turnstile enabled, site key and secret key configured.'];
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkRedis(): array
+    protected function checkRedis(): ReadinessCheckResult
     {
         try {
             Redis::connection()->ping();
@@ -521,8 +536,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('Redis', 'reachable');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkStripe(): array
+    protected function checkStripe(): ReadinessCheckResult
     {
         $secret = (string) config('platform-billing.stripe.secret');
 
@@ -533,8 +547,7 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('Stripe', 'STRIPE_SECRET configured');
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function checkMail(): array
+    protected function checkMail(): ReadinessCheckResult
     {
         $host = (string) config('mail.mailers.smtp.host', '');
         $port = (string) config('mail.mailers.smtp.port', '');
@@ -564,10 +577,8 @@ class ProductionReadinessCheck extends Command
      * worth surfacing, but not something that should block an otherwise
      * legitimate deploy/emergency-fix workflow, matching this command's
      * own established philosophy (see class docblock).
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkBackupHealth(): array
+    protected function checkBackupHealth(): ReadinessCheckResult
     {
         $dailyRoot = rtrim((string) config('platform-backup.root'), '/').'/daily';
 
@@ -617,10 +628,8 @@ class ProductionReadinessCheck extends Command
      * never a live call to the offsite provider. Same
      * cross-package-config-only pattern as `checkBackupHealth()` (no
      * dependency on `Platform\Backup`'s own classes, plain `json_decode`).
-     *
-     * @return array{0: string, 1: string, 2: string}
      */
-    protected function checkOffsiteBackupHealth(): array
+    protected function checkOffsiteBackupHealth(): ReadinessCheckResult
     {
         if (! config('platform-backup.offsite.enabled')) {
             return $this->resultInfo('Offsite Backup', 'disabled (BACKUP_OFFSITE_ENABLED is not true) - local backups only. See docs/implementation/backup-and-recovery.md "Offsite sync".');
@@ -660,31 +669,23 @@ class ProductionReadinessCheck extends Command
         return $this->resultPass('Offsite Backup', "newest successful offsite sync: [{$status['timestamp']}] ({$ageHours}h ago, {$status['object_count']} object(s) at {$status['remote_path']}).");
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function resultPass(string $check, string $detail): array
+    protected function resultPass(string $check, string $detail): ReadinessCheckResult
     {
-        return [$check, '<info>PASS</info>', $detail];
+        return new ReadinessCheckResult($check, ReadinessStatus::Pass, $detail);
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function resultWarn(string $check, string $detail): array
+    protected function resultWarn(string $check, string $detail): ReadinessCheckResult
     {
-        $this->warnings++;
-
-        return [$check, '<comment>WARN</comment>', $detail];
+        return new ReadinessCheckResult($check, ReadinessStatus::Warn, $detail);
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function resultFail(string $check, string $detail): array
+    protected function resultFail(string $check, string $detail): ReadinessCheckResult
     {
-        $this->failures++;
-
-        return [$check, '<error>FAIL</error>', $detail];
+        return new ReadinessCheckResult($check, ReadinessStatus::Fail, $detail);
     }
 
-    /** @return array{0: string, 1: string, 2: string} */
-    protected function resultInfo(string $check, string $detail): array
+    protected function resultInfo(string $check, string $detail): ReadinessCheckResult
     {
-        return [$check, 'INFO', $detail];
+        return new ReadinessCheckResult($check, ReadinessStatus::Info, $detail);
     }
 }

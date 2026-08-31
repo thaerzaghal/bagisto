@@ -17,6 +17,7 @@ use Platform\Tenancy\Console\Commands\EnforceCodOnlyPaymentPosture;
 use Platform\Tenancy\Console\Commands\MarkPlatformInstalled;
 use Platform\Tenancy\Console\Commands\MigrateCentral;
 use Platform\Tenancy\Console\Commands\MigratePendingTenants;
+use Platform\Tenancy\Console\Commands\ProductionMonitor;
 use Platform\Tenancy\Console\Commands\ProductionReadinessCheck;
 use Platform\Tenancy\Console\Commands\ProvisionTenant;
 use Platform\Tenancy\Console\Commands\ReindexTenant;
@@ -31,6 +32,7 @@ use Platform\Tenancy\Listeners\RejectBagistoInstallAgainstProtectedDatabase;
 use Platform\Tenancy\Listeners\RetargetElasticsearchIndexPrefix;
 use Platform\Tenancy\Listeners\RetargetImageCachePaths;
 use Platform\Tenancy\Services\CentralDatabaseWipeGuard;
+use Platform\Tenancy\Services\ProductionMonitorState;
 use Platform\Tenancy\Services\TenantHostResolver;
 use Platform\Tenancy\Support\LocaleAwareCartRuleRepository;
 use Platform\Tenancy\Support\LocaleAwareCore;
@@ -161,6 +163,24 @@ class TenancyServiceProvider extends ServiceProvider
     public function register()
     {
         $this->bindLocaleAwareCountryStateConsumers();
+        $this->bindProductionMonitorState();
+    }
+
+    /**
+     * TASK-OPS-MONITORING-001. `ProductionMonitorState`'s constructor takes
+     * a plain `string $directory` - not container-auto-wireable - so it is
+     * bound explicitly here, resolved from `config('platform-monitoring.
+     * state_path')`. `singleton()`, not `bind()`: a single monitor
+     * invocation may resolve this more than once (the command itself, and
+     * `ProductionMonitorRunner` via its own constructor injection) and
+     * both must agree on the exact same directory/lock file for the
+     * overlap lock to mean anything.
+     */
+    protected function bindProductionMonitorState(): void
+    {
+        $this->app->singleton(ProductionMonitorState::class, fn () => new ProductionMonitorState(
+            (string) config('platform-monitoring.state_path')
+        ));
     }
 
     /**
@@ -232,6 +252,7 @@ class TenancyServiceProvider extends ServiceProvider
                 RepairSenderIdentity::class,
                 EnforceCodOnlyPaymentPosture::class,
                 ProductionReadinessCheck::class,
+                ProductionMonitor::class,
             ]);
         }
     }

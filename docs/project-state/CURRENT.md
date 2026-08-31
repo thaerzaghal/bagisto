@@ -3,7 +3,7 @@
 **Last reviewed:** 2026-08-31
 **Branch:** 2.4
 **Status:** Living Document
-**Source:** TASK-PROJECT-STATE-001 (architecture & readiness audit), reconciled by TASK-PROJECT-STATE-002
+**Source:** TASK-PROJECT-STATE-001 (architecture & readiness audit), reconciled by TASK-PROJECT-STATE-002, extended by TASK-OPS-MONITORING-001 (production monitoring/alerting — implemented and locally tested, see §12/§19.1; not yet deployed or activated)
 
 **Evidence scope:** Production-verification labels retain the dated evidence
 from the original audit and closing tasks. This reconciliation follow-up
@@ -210,8 +210,11 @@ checks (`APP_DEBUG`, `TRUSTED_PROXIES`, domain config, cache store, session
 driver, response-cache-disabled, DB provisioning user, deployed source
 commit, Admin/Shop static asset consistency, public signup posture,
 Turnstile config, Redis reachability, Stripe posture, mail config, local
-backup health, offsite backup health). See §12 for the health-checking vs.
-monitoring distinction.
+backup health, offsite backup health). `php artisan platform:production:monitor`
+(TASK-OPS-MONITORING-001) wraps this same check set with opt-in operator
+email alerting — implemented and locally tested, **not yet deployed or
+activated**. See §12 for the health-checking vs. monitoring distinction
+and the full monitor design/status.
 
 ### packages/Platform module map
 
@@ -582,19 +585,43 @@ decisions, not follow-up work.
 | Daily local backup, offsite sync to Cloudflare R2, checksum-verified restore drill | **PRODUCTION VERIFIED** — proven via a real restore drill against disposable databases, and via this project's own TASK-PILOT-003A backup run |
 | `platform:production:check` readiness gate (19 checks in current source) | **PRODUCTION VERIFIED** — gates `deploy.sh`'s own exit code |
 | Structured/per-tenant logging | **PARTIAL** — per-tenant log files exist as a side effect of filesystem isolation (`storage/tenant{id}/logs`), not a deliberate observability design |
-| Proactive alerting (a human is notified when a check fails) | **NOT IMPLEMENTED** |
+| Proactive alerting (a human is notified when a check fails) | **IMPLEMENTED — NOT DEPLOYED, NOT PRODUCTION VERIFIED** (TASK-OPS-MONITORING-001) — see below |
 
-**Health checking vs. monitoring/alerting — the real gap.**
-`platform:production:check` is thorough and battle-tested, but it is
-**pulled, never pushed**: nothing runs it on a schedule, and nothing
+**Health checking vs. monitoring/alerting — narrowed, not yet closed.**
+`platform:production:check` is thorough and battle-tested, but on its own
+it is **pulled, never pushed**: nothing runs it on a schedule, and nothing
 notifies an operator when it would report a failure. A stale backup, a
 failed offsite sync, or a broken static asset only surfaces the moment
 someone thinks to run the command by hand — this is exactly what happened
 during this project's own TASK-PILOT-006 close-out, where a real WARN
 (backup-directory permissions, resolved as a false alarm from the
 invocation context — see that task's own report) would have gone unnoticed
-without a manual run. **No monitoring/alerting platform exists anywhere in
-this stack.**
+without a manual run.
+
+**`php artisan platform:production:monitor` now exists to close this** — a
+small, opt-in alerting command wrapped around the exact same
+`ProductionReadinessCheck::collectResults()` (no duplicated check logic,
+console output/exit-code behavior unchanged and regression-tested).
+Real/new/changed/reminder-due/recovered incidents are emailed to one
+configured operator recipient through the existing central SMTP mailer;
+duplicates are suppressed (keyed on check+status, never on volatile detail
+text); a failed delivery leaves the incident pending for the next
+scheduled run rather than being silently dropped; state persists to a
+durable JSON file (a sibling of the existing backup volume); overlap is
+prevented via a non-blocking file lock. 20 dedicated tests
+(`tests/Feature/Platform/ProductionMonitorTest.php`) plus one manual,
+local-only verification against Mailpit (never a real send) — see
+`docs/architecture/production-deployment.md` "Monitoring / alerting" for
+the full mechanism, configuration, execution-user finding, prepared
+(not-installed) cron entry, and disable/rollback steps.
+
+**Explicitly NOT yet true**: this has never run against the real
+production server, `MONITOR_ALERT_ENABLED` is unset everywhere, no cron
+entry exists, and no real notification has ever been sent. The
+"operational blind spot" this closes remains open in PRODUCTION until a
+deliberate activation step (deploy → dry-run verify → enable → confirm one
+real delivery → install the cron entry) is performed and evidenced — see
+§18/§19.
 
 ---
 
@@ -671,7 +698,7 @@ anywhere in the codebase.
 |---|---|---|---|
 | `products.limit` enforcement TOCTOU race (no lock across the count-check and the real product insert) | Low at current scale | No | Before public scale |
 | **Known upstream inventory-availability concurrency limitation** — Bagisto's own `Simple::haveSufficientQuantity()` (the cart-add stock check) holds no row lock across the availability check and the reservation write; two simultaneous checkouts for the last unit of a managed-stock product could both pass the check. A genuinely separate finding from the `products.limit` race above (unrelated code path, unrelated package). Confirmed via source trace (TASK-PILOT-005); not a Platform defect — Bagisto's own architecture. Low risk at current single-merchant, low-order-volume scale. | Low at current scale | No | Before public scale |
-| No proactive alerting on production-check failures | Medium — operational blind spot | No, but risky | Before 5 merchants |
+| Proactive alerting implemented and locally tested but not yet deployed/activated in production (`platform:production:monitor`) | Medium — operational blind spot remains open in production until activated | No, but risky | Immediate next step (deploy + activate — see §12) |
 | No tenant deletion/export lifecycle | Medium — offboarding has no supported path | Soft — matters once a merchant churns | Before 5 merchants |
 | No Platform Admin RBAC / action audit log | Medium — fine for one operator | Yes, once staff grows | Before public scale |
 | No governorate/city shipping-rate differentiation | Product gap, not a defect | No | Before public scale |
@@ -762,7 +789,7 @@ enterprise features.
 
 | Item | Who needs it | Scope | Classification |
 |---|---|---|---|
-| Proactive alerting on `platform:production:check` failures | Operator | S | Scale readiness |
+| Deploy + activate `platform:production:monitor` against real production (implemented/tested locally, TASK-OPS-MONITORING-001 — see §12) | Operator | XS (deploy + 4-step activation procedure, already documented) | Scale readiness |
 | Tenant deletion / export / offboarding lifecycle | Operator | L | Scale readiness |
 | Platform Admin RBAC + action audit log | Operator | M | Scale readiness |
 | Scheduled, unattended backup restore-verification | Operator | S | Scale readiness |
@@ -787,16 +814,29 @@ Ordered by real value/risk, not novelty. Each is scoped to move Technify
 from its current proven state toward supporting additional operator-managed
 merchants safely.
 
-### 1. Production monitoring & alerting — Size S
-- **Why now**: the single largest gap between "we'd notice a real problem"
-  and "a merchant hits a failure before we do." This audit itself surfaced
-  a real production-check WARN that nobody would have seen without a
-  manual run.
-- **Outcome**: a scheduled `platform:production:check` run (cron) that
-  pushes a notification (email/webhook) on any FAIL or new WARN.
-- **Not building**: a full observability platform (Grafana/Sentry/etc.) —
-  not warranted at 7 tenants.
-- **Deploy expected**: yes, small.
+### 1. Deploy and activate production monitoring & alerting — Size XS
+- **Status**: the mechanism itself is **built and locally tested**
+  (TASK-OPS-MONITORING-001, `platform:production:monitor`, 20 dedicated
+  tests, one manual local Mailpit verification) — what remains is
+  deployment and activation, not design or implementation. See §12 and
+  `docs/architecture/production-deployment.md` "Monitoring / alerting" for
+  the full mechanism and the exact, already-written activation procedure.
+- **Why now**: still the single largest gap between "we'd notice a real
+  problem" and "a merchant hits a failure before we do" — and now the
+  cheapest possible version of this task, since the engineering work is
+  already done and reviewed.
+- **Outcome**: deploy the already-implemented command, run
+  `platform:production:monitor --dry-run` against real production to
+  verify safely, set `MONITOR_ALERT_ENABLED`/`MONITOR_ALERT_RECIPIENT`,
+  confirm one real delivery reaches the operator inbox, then install the
+  prepared (not-yet-installed) 5-minute cron entry.
+- **Not building**: a full observability platform (Grafana/Sentry/etc.),
+  or a second (non-application-based) uptime/heartbeat monitor — both
+  remain genuinely out of scope; see `docs/architecture/production-
+  deployment.md`'s own explicit "what this MVP does NOT detect" section
+  for the boundary between the two.
+- **Deploy expected**: yes — this is now purely a deployment/activation
+  step, no further code change anticipated.
 
 ### 2. Scheduled backup restore-verification — Size S
 - **Why now**: backups are real and checksum-verified on write; restore has
@@ -880,9 +920,12 @@ Ready, activation email, done. Nothing structural blocks it.
 
 **4. What would stop us from onboarding 5 merchants?**
 Nothing structural. The honest risk is operational blindness — no
-alerting means a real failure (a stale backup, a broken asset) is
-discovered by luck, not by the system telling anyone. Recommended task 1
-addresses that alerting gap; task 2 adds recurring proof that backups restore.
+*activated* alerting means a real failure (a stale backup, a broken asset)
+is still discovered by luck today, not by the system telling anyone. The
+mechanism to close this is now built and locally tested (TASK-OPS-MONITORING-001,
+§12/§19.1) but **not yet deployed or turned on in production** — the
+remaining gap is a deployment/activation step, not an engineering one.
+Recommended task 2 adds recurring proof that backups restore.
 
 **5. What would stop us from onboarding 20 merchants?**
 The single-operator trust model (no RBAC, no audit trail), no tenant
@@ -891,20 +934,18 @@ multi-governorate delivery reality — none of these are close blockers
 today; all three become real at that scale.
 
 **6. What is the single most important next task?**
-Production monitoring & alerting (§19.1) — **re-confirmed, not assumed,
-after this reconciliation.** Four gaps incorrectly listed as open in the
-original audit (mail sender identity, state-dropdown localization, Admin
-grid timezone rendering, unsupported payment gateways) were already closed —
-none of them were monitoring-related, and none of them change the
-underlying reasoning: `platform:production:check` remains a *pulled* check
-with no scheduled run and no notification path. If anything, closing four
-real, previously-open risks without incident makes the case *stronger*, not
-weaker — the operational discipline behind this platform is genuinely
-good, and the one place that discipline could still fail silently (a
-missed manual check) remains completely unaddressed. It is the cheapest
-task on the list and the one that turns every other already-proven
-mechanism (backups, production-check, deploy gate) from "correct if
-someone remembers to look" into "correct, and we'd know if it weren't."
+Deploying and activating production monitoring & alerting (§19.1) —
+**re-confirmed twice now, not assumed.** The underlying reasoning has not
+changed across two reconciliation passes: `platform:production:check`
+alone remains a *pulled* check, and the one place operational discipline
+could fail silently (a missed manual check) stays open in production
+until this is actually turned on. What changed in this pass
+(TASK-OPS-MONITORING-001) is that the mechanism itself is no longer
+undesigned work — it is built, locally tested (20 dedicated tests), and
+documented end-to-end, including the exact activation procedure. The
+remaining task is now genuinely the smallest one on this list: deploy,
+verify with `--dry-run`, enable, confirm one real delivery, install the
+prepared cron entry.
 
 **7. What should we deliberately NOT build yet?**
 These fall into different categories — not one blanket "future work" bucket:
@@ -925,18 +966,32 @@ These fall into different categories — not one blanket "future work" bucket:
   Platform Admin RBAC beyond a basic audit log** genuinely are not
   warranted at the current 7-tenant scale — §19's recommended tasks
   intentionally stop short of either.
+- **A genuine, external uptime/heartbeat monitor** (something outside this
+  host confirming the application is alive at all) is a real, disclosed
+  gap `platform:production:monitor`'s own application-based design
+  structurally cannot close (see `docs/architecture/production-
+  deployment.md` "Monitoring / alerting" — "what this MVP detects, and
+  what it structurally cannot"), but is deliberately not built here —
+  it needs a real external service decision this document does not make
+  for the operator.
 
 ---
 
 *This document was produced by TASK-PROJECT-STATE-001, a read-only audit,
-and reconciled against current evidence by TASK-PROJECT-STATE-002
-(2026-08-31) — four sections (mail sender identity, storefront state
-localization, Admin grid timezone rendering, COD-only payment enforcement)
-were updated from NOT IMPLEMENTED/PARTIAL to PRODUCTION VERIFIED based on
-earlier work whose closure evidence the original audit had missed
-(`RISK_REGISTER.md` R73/R74/R75/R78, `DECISION_LOG.md` C95-C98). No code,
-production data, or configuration was modified in producing either pass.
-Evidence was drawn from `docs/architecture/*`, `docs/decisions/*`,
-`RISK_REGISTER.md`, `DECISION_LOG.md`, `tests/Feature/Platform/*`
-(57 files), `git log`, and read-only passes against the live production
-server.*
+reconciled against current evidence by TASK-PROJECT-STATE-002 (2026-08-31)
+— four sections (mail sender identity, storefront state localization,
+Admin grid timezone rendering, COD-only payment enforcement) were updated
+from NOT IMPLEMENTED/PARTIAL to PRODUCTION VERIFIED based on earlier work
+whose closure evidence the original audit had missed (`RISK_REGISTER.md`
+R73/R74/R75/R78, `DECISION_LOG.md` C95-C98) — and extended by
+TASK-OPS-MONITORING-001 (2026-08-31), which implemented and locally tested
+`platform:production:monitor` (§12/§19.1) but explicitly did NOT deploy,
+activate, or send any real notification. No code, production data, or
+configuration was modified in producing the first two passes; the third
+pass added Platform-owned code (`packages/Platform/Tenancy`) and
+documentation only, with no production access, deployment, or real
+notification at any point. Evidence was drawn from `docs/architecture/*`,
+`docs/decisions/*`, `RISK_REGISTER.md`, `DECISION_LOG.md`,
+`tests/Feature/Platform/*` (60 files as of this pass), `git log`, local
+Sail-container test runs, and read-only passes against the live production
+server (TASK-PROJECT-STATE-001/002 only).*

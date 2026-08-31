@@ -67,6 +67,18 @@ skills-lock.json
 # own .gitignore anticipates. Never commit tenant runtime storage.
 /storage/tenant*/
 /test-results
+
+# TASK-OPS-MONITORING-001. config/platform-backup.php's BACKUP_ROOT and
+# config/platform-monitoring.php's MONITOR_STATE_PATH both default (when
+# unset in .env, e.g. plain local dev) to a path derived from storage_path()
+# that resolves under the repo root itself in this Sail-mounted local
+# environment - a real backup/monitoring-state directory, never meant to be
+# tracked, the exact same class of generated-runtime-content exclusion as
+# storage/tenant*/ above. Production always sets BACKUP_ROOT=/backups (a
+# dedicated bind mount outside the app source tree entirely - see
+# docs/implementation/backup-and-recovery.md), so this only ever matters
+# for local testing.
+/backups/
 /vendor
 yarn.lock
 yarn-error.log

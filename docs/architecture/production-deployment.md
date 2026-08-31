@@ -454,3 +454,96 @@ RISK_REGISTER.md R77 for the full evidence chain.
 ## Q. `packages/Webkul/*` is not our customization surface
 
 Every command, config change, and deployment step in this document operates entirely on `Platform\*` packages, root config files, and `bootstrap/app.php`. Nothing in this document requires, and nothing should ever require, editing `packages/Webkul/*` - that remains Bagisto's own unmodified upstream code for the lifetime of this project.
+
+## R. Monitoring / alerting
+
+**Status: IMPLEMENTED, LOCALLY TESTED, NOT DEPLOYED, NOT ACTIVATED (TASK-OPS-MONITORING-001).** `php artisan platform:production:monitor` is a thin, opt-in alerting layer around section E/the existing `php artisan platform:production:check` (section 12/§12 of `docs/project-state/CURRENT.md`'s own "health checking vs. monitoring" gap). This section documents the mechanism, its configuration, and the exact activation procedure - none of which has been performed against the real production server. No cron entry has been installed; no real notification has ever been sent; `MONITOR_ALERT_ENABLED` remains unset/false everywhere.
+
+### What it does
+
+`platform:production:monitor` calls the exact same `ProductionReadinessCheck::collectResults()` the console command itself uses (a small, added structured-result refactor - see that class's own docblock; the console table's rendered output is byte-for-byte unchanged) and compares this run's statuses against its own small, persisted JSON state file. It emails a single configured operator recipient exactly when something is worth attention: a genuinely new WARN/FAIL, a severity change (WARN↔FAIL), an unresolved incident that has passed the configured reminder interval, or a recovery (a previously-notified check returning to PASS/INFO) - never a duplicate for the same unchanged status, and never fingerprinted on volatile detail text (ages, timestamps, hashes).
+
+### Configuration (`.env`, see `.env.example` for the full block with inline comments)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MONITOR_ALERT_ENABLED` | `false` | Master switch. Opt-in, disabled everywhere until an operator deliberately sets it. |
+| `MONITOR_ALERT_RECIPIENT` | *(blank)* | The one operator inbox. Never inferred from tenant/merchant data. Required before enabling - the command fails visibly, never silently, if blank while enabled. |
+| `MONITOR_REMINDER_INTERVAL_MINUTES` | `360` (6h) | How long an unresolved incident waits before a reminder repeats. |
+| `MONITOR_MAIL_TIMEOUT` | `10` (seconds) | Bounds one delivery attempt via `config('mail.mailers.smtp.timeout')` - a real, already-supported Laravel/Symfony Mailer option, not an invented one. |
+| `MONITOR_STATE_PATH` | `<BACKUP_ROOT>/monitoring` | Where the JSON state file + overlap-lock file live. Defaults to a sibling of the already-durable, already-bind-mounted backup volume - zero new infrastructure. |
+
+Mail is sent through the plain `smtp` mailer (`config('mail.mailers.smtp.*')`) - the exact same central config `checkMail()` already inspects, resolved via `Mail::mailer('smtp')->to(...)->send(...)` specifically (not `Mail::to(...)->send(...)`, which would let Laravel's own `Mailer::sendMailable()` silently force the message through `config('mail.default')` instead - `bagisto-dynamic-smtp`, Bagisto's per-tenant transport, which requires an active channel and throws in central context; a real, reproduced finding during this task's own local testing, documented in `ProductionAlertMail`'s own docblock). Never initializes tenant context; never touches tenant business data.
+
+### Execution user - a disclosed finding, not an assumption
+
+**`docker compose exec app <command>` runs as the container's default user, which source inspection confirms is root, not `www-data`.** `Dockerfile.production` never sets `USER www-data` at the container level (its own comment explains why: `entrypoint.sh` - which itself runs as root - prepares `storage/`/`backups/` ownership on every container start, then hands off to php-fpm, which drops only its own **worker** processes to `www-data` via the pool config; a `docker compose exec` command is a separate process the Docker daemon execs directly into the container, never spawned through that php-fpm worker pool at all). This is a real, sourced correction to this document's own adjacent §N/backup-and-recovery.md prose ("the container's own internal process still runs as www-data/php-fpm exactly as every other artisan command in this project does") - that characterization does not hold for `docker compose exec`-invoked commands specifically; not verified or corrected against the live production server as part of this task (no production access), and not silently rewritten in the other document (out of this task's scope) - flagged here for whoever activates this next.
+
+**Recommended execution context: match the existing backup/offsite-sync/cleanup cron jobs exactly - no `-u` override, i.e. the container's default (root).** Every readiness check itself needs no elevated privilege (plain config reads, a Redis ping, an internal HTTP call, and reads of the already `www-data`-owned app source tree and `/backups` directory - see `entrypoint.sh`: `chown -R www-data:www-data /backups`). A genuinely least-privileged `-u www-data` invocation is technically possible for the checks alone, but is **not** recommended without first confirming, against the real server, that every backup artifact `checkBackupHealth()`/`checkOffsiteBackupHealth()` read is actually group/other-readable by `www-data` - if the existing backup cron jobs really do run as root (the same `docker compose exec app ...` pattern, un-flagged), files they create could plausibly end up owned by root's own primary group, not readable by `www-data` as "other" under a restrictive `0640` mode. Matching the existing convention avoids introducing a new, untested permission boundary; this task does not change backup file ownership/permissions to make itself pass.
+
+### Prepared production scheduling (NOT installed)
+
+```cron
+# TASK-OPS-MONITORING-001 - platform:production:monitor, every 5 minutes.
+# NOT YET INSTALLED - add only as part of a deliberate activation step,
+# after MONITOR_ALERT_ENABLED/MONITOR_ALERT_RECIPIENT are set in the real
+# production .env and the disable/rollback steps below are understood.
+*/5 * * * * cd /opt/estore/app && /usr/bin/docker compose -f docker-compose.production.yml exec -T app php artisan platform:production:monitor >> /opt/estore/monitor-run.log 2>&1
+```
+
+Every 5 minutes is a reasonable initial interval: fast enough to catch a real regression quickly, far below the 6-hour reminder interval (so a still-broken check is never re-emailed on every single 5-minute tick), and cheap (the command's own overlap lock plus its bounded 10-second mail timeout keep a single run short). A dedicated log file (`monitor-run.log`), never mixed with `backup-run.log`, matches this project's own established one-log-per-scheduled-job convention.
+
+**Overlap handling**: a non-blocking `flock()` on `<MONITOR_STATE_PATH>/.monitor.lock` - if a run is still in progress when the next 5-minute tick fires (should not normally happen given the command's own short runtime), the new invocation exits 0 immediately with a "Skipped: another invocation currently holds the lock" message, logged but never treated as a failure. **Execution time is bounded** by the mail-delivery timeout above plus the readiness checks' own already-existing 3-second HTTP timeout (`checkAdminStaticAssets()`/`checkShopStaticAssets()`) - a full run has no unbounded step. **Failure visibility**: the command's own exit code is non-zero only for a genuine monitor-level problem (an exception inside the readiness checks themselves, or a real delivery failure while alerting is enabled) - `cron`'s own standard failure signal (a non-zero exit, visible in `monitor-run.log`) is the backstop if this command itself ever breaks, exactly like every other scheduled Platform command in this project.
+
+### State location
+
+`<MONITOR_STATE_PATH>/state.json` - one JSON object, `checks` (per-check status/onset-time/last-successfully-notified status+timestamp) and `meta` (last run time, last monitor-level error if any, last delivery-skip reason if any). Contains no secrets, no tenant/customer data, no stack traces - only the same secret-safe check labels/statuses/detail text `platform:production:check`'s own console table has always shown, plus timestamps. Survives container recreation (the same bind-mounted volume `BACKUP_ROOT` already uses).
+
+### Delivery failure handling
+
+A failed send (unreachable relay, bad credentials, missing recipient) never marks an incident as notified - the exact same batch is recomputed and retried on the next scheduled run, with no in-process retry/backoff loop (see `ProductionMonitorRunner`'s own docblock for why: a single bounded attempt per invocation keeps a cron-triggered run short and simple; the next 5-minute tick **is** the retry).
+
+### Safe verification (before real activation)
+
+```bash
+# 1. Dry run - computes and prints the full decision, sends no mail,
+#    writes no state. Safe to run against real production at any time,
+#    including before MONITOR_ALERT_ENABLED is ever set.
+php artisan platform:production:monitor --dry-run
+
+# 2. A real state-tracking run with alerting still disabled - persists
+#    state (so the diffing/reminder logic can be observed building up
+#    over a few real runs) but still sends no mail.
+php artisan platform:production:monitor
+
+# 3. Inspect the resulting state file directly - confirm it looks correct
+#    (real check labels, no secrets, no tenant data) before enabling mail.
+cat <MONITOR_STATE_PATH>/state.json
+
+# 4. Only once satisfied: set MONITOR_ALERT_ENABLED=true and
+#    MONITOR_ALERT_RECIPIENT in the real .env, redeploy (or just
+#    `php artisan config:clear` if only .env changed), then run once more
+#    manually and confirm the operator inbox actually receives it before
+#    installing the cron entry above.
+```
+
+### Disable / rollback
+
+- **Stop real notifications immediately**: set `MONITOR_ALERT_ENABLED=false` (or blank `MONITOR_ALERT_RECIPIENT`) in `.env` and clear config - the command keeps running (if scheduled) and keeps tracking state, but sends nothing.
+- **Stop the command from running at all**: remove the cron line above (`crontab -e`, delete the one line) - nothing else in this project depends on it.
+- **Full removal**: deleting `<MONITOR_STATE_PATH>/` is safe at any time - the next run starts from a clean baseline (a genuinely first-ever run: any current WARN/FAIL is treated as brand-new, never a false "recovered" notice for anything, matching the same rule a real first-ever run already follows).
+- This feature makes **no change** to `platform:production:check` itself beyond the internal `collectResults()` refactor (console output, check semantics, and the deploy-gating exit code are all unchanged and regression-tested) - disabling or removing the monitor never affects deploys, backups, or any other existing operational mechanism.
+
+### What this MVP detects, and what it structurally cannot
+
+An application-based monitor running on the same host, through the same application bootstrap, using the same central SMTP path it is monitoring, **cannot guarantee notification of every possible failure** - some failure modes take the monitor itself down along with whatever it was supposed to report on.
+
+**Detected**: any condition `platform:production:check`'s own 19 checks already cover (misconfiguration, stale/missing backups, broken static assets, Redis unreachable, etc.) while the `app` container and its cron are both still running and able to reach the configured SMTP relay - including the relay being slow/flaky (bounded, retried on the next tick) and the checks themselves throwing an unexpected exception (treated as a monitor-level FAIL, still alerted, per `ProductionMonitorRunner`'s own exception handling).
+
+**NOT detected / structurally out of reach for this mechanism**:
+- The `app` container itself crashed, was never started, or the whole host is down - there is no process left to run `platform:production:monitor` at all.
+- Cron itself is broken/stopped on the host.
+- The configured SMTP relay is down or unreachable **for a sustained period** - retries happen, but only every 5 minutes via the same host; a relay outage that also correlates with whatever caused the underlying incident could delay notification indefinitely.
+- Anything before this mechanism could plausibly run at all (e.g. the host's disk is completely full, docker itself cannot exec into the container).
+
+**A genuine, independent uptime/heartbeat monitor - a third party or separate infrastructure periodically confirming this host/application is alive from OUTSIDE it - is the only way to close these gaps, and is explicitly out of scope for this task** (task instruction: do not introduce an external monitoring service without approval). This MVP is a real, meaningful improvement over the current "nothing" (see `docs/project-state/CURRENT.md` §12's own "pulled, never pushed" finding) - it is not, and does not claim to be, full outage coverage.

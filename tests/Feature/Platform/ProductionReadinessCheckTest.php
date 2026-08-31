@@ -42,6 +42,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Platform\Tenancy\Console\Commands\ProductionReadinessCheck;
+use Platform\Tenancy\Support\ReadinessStatus;
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -486,9 +487,9 @@ test('21. reports INFO, not WARN/FAIL, when no Vite manifest exists at all for a
 
     $result = $method->invoke($command, 'Test theme', 'themes/tor-r76-nonexistent-fixture/build');
 
-    expect($result[0])->toBe('Test theme');
-    expect($result[1])->toBe('INFO');
-    expect($result[2])->toContain('not applicable in this environment');
+    expect($result->check)->toBe('Test theme');
+    expect($result->status)->toBe(ReadinessStatus::Info);
+    expect($result->detail)->toContain('not applicable in this environment');
 });
 
 test('22. reports a WARN when a manifest exists but is missing an expected entry - a build-config concern, not asset drift', function () {
@@ -506,14 +507,14 @@ test('22. reports a WARN when a manifest exists but is missing an expected entry
 
         $result = $method->invoke($command, 'Test theme', 'themes/tor-r76-incomplete-fixture/build');
 
-        // resultWarn() wraps the status in a console formatting tag (same
-        // convention as resultPass()'s '<info>PASS</info>' and
-        // resultFail()'s '<error>FAIL</error>') - only resultInfo() returns
-        // a bare string. Assert via toContain() rather than a brittle
-        // hardcoded tag string, matching this test's own "structural check,
-        // not hardcoded output" spirit.
-        expect($result[1])->toContain('WARN');
-        expect($result[2])->toContain('unexpected build structure');
+        // TASK-OPS-MONITORING-001: check*() methods (including this
+        // private helper) now return a structured `ReadinessCheckResult`
+        // instead of a `[check, coloredStatus, detail]` tuple - assert
+        // against the typed `status` enum directly rather than console
+        // formatting tags, matching this test's own "structural check,
+        // not hardcoded output" spirit even more directly than before.
+        expect($result->status)->toBe(ReadinessStatus::Warn);
+        expect($result->detail)->toContain('unexpected build structure');
     } finally {
         unlink($fixtureDir.'/manifest.json');
         rmdir($fixtureDir);
