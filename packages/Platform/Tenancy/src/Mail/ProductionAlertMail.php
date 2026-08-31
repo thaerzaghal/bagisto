@@ -75,6 +75,18 @@ final class ProductionAlertMail extends Mailable
 
     public function envelope(): Envelope
     {
+        // TASK-OPS-MONITORING-001A: a deliberately-triggered
+        // `--test-notification` (see ProductionMonitorRunner::
+        // sendTestNotification()) is never a real incident/recovery - a
+        // distinct subject line makes that unambiguous to the reader,
+        // rather than counting it as a real "issue" alongside genuine
+        // WARN/FAIL notifications.
+        if (count($this->notifications) === 1 && $this->notifications[0]['reason'] === 'test') {
+            return new Envelope(
+                subject: "[{$this->appLabel}] platform:production:monitor - test notification",
+            );
+        }
+
         $newOrChanged = count(array_filter($this->notifications, fn (array $n): bool => $n['reason'] !== 'recovered'));
         $recovered = count($this->notifications) - $newOrChanged;
 

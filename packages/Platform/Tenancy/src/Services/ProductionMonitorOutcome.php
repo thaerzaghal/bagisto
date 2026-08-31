@@ -17,8 +17,9 @@ use Throwable;
 final class ProductionMonitorOutcome
 {
     /**
-     * @param  array<int, ReadinessCheckResult>  $results  every check's result this run, unfiltered
+     * @param  array<int, ReadinessCheckResult>  $results  every check's result this run - the real checks plus the synthetic "Production monitor" pseudo-check (TASK-OPS-MONITORING-001A) that is always present, Pass when collection succeeded, Fail when it did not
      * @param  array<int, array{check: string, reason: string, status: string, detail: string, since: string}>  $notifications  the batch this run decided was worth notifying about (new/changed/reminder-due/recovered) - may be non-empty even when nothing was actually sent (disabled, dry-run, or a delivery failure)
+     * @param  string|null  $configurationProblem  TASK-OPS-MONITORING-001A: a description of an invalid *enabled* configuration (missing/malformed recipient) found BEFORE evaluating any incident - present even on a run with zero WARN/FAIL checks, so an operator can never see "all healthy" while alerting is silently unable to fire
      */
     public function __construct(
         public readonly array $results,
@@ -27,6 +28,7 @@ final class ProductionMonitorOutcome
         public readonly ?string $deliverySkippedReason,
         public readonly ?Throwable $monitorException,
         public readonly bool $dryRun,
+        public readonly ?string $configurationProblem = null,
     ) {}
 
     public function hasIncidents(): bool

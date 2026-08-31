@@ -82,10 +82,32 @@ return [
      * OUTSIDE any tenant-suffixed storage path (`storage/tenant{id}/...`)
      * - the monitor never initializes tenant context and never wants its
      * own bookkeeping to collide with `FilesystemTenancyBootstrapper`.
+     *
+     * TASK-OPS-MONITORING-001A: a plain `env('MONITOR_STATE_PATH', $default)`
+     * is NOT enough - a real, reproduced finding - `.env.example` (and any
+     * real `.env` copied from it before this value is deliberately set)
+     * ships the line `MONITOR_STATE_PATH=` (present, blank, never
+     * commented out). `phpdotenv` sets the actual process environment
+     * variable to an empty STRING in that case, and `env()` only falls
+     * back to `$default` for a genuinely UNSET variable - an empty string
+     * is not null, so the untrimmed call below would have silently
+     * resolved to `''`, and every path this class builds
+     * (`Platform\Tenancy\Services\ProductionMonitorState::stateFilePath()`/
+     * `lockFilePath()`) would have been relative to nothing (effectively
+     * the current working directory). Trimming and explicitly treating a
+     * blank result as "not configured" restores the documented default in
+     * exactly that case; `ProductionMonitorState` itself independently
+     * rejects an unsafe resolved path too (defense in depth, never
+     * trusting this file's own arithmetic alone).
      */
-    'state_path' => env(
-        'MONITOR_STATE_PATH',
-        rtrim((string) env('BACKUP_ROOT', dirname(storage_path()).'/backups'), '/').'/monitoring'
-    ),
+    'state_path' => (static function (): string {
+        $configured = trim((string) env('MONITOR_STATE_PATH', ''));
+
+        if ($configured !== '') {
+            return $configured;
+        }
+
+        return rtrim((string) env('BACKUP_ROOT', dirname(storage_path()).'/backups'), '/').'/monitoring';
+    })(),
 
 ];

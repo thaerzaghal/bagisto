@@ -9,16 +9,19 @@ use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Platform\Tenancy\Console\Commands\ProductionReadinessCheck;
 use Platform\Tenancy\Mail\ProductionAlertMail;
+use Platform\Tenancy\Support\NotificationRedactor;
 use Platform\Tenancy\Support\ReadinessCheckResult;
 use Platform\Tenancy\Support\ReadinessStatus;
+use RuntimeException;
 use Throwable;
 
 /**
- * TASK-OPS-MONITORING-001. The decision logic behind `platform:production:
- * monitor` - reuses `ProductionReadinessCheck::collectResults()` verbatim
- * (never re-implements a single check, never parses console output) and
- * decides, against the LAST PERSISTED state, whether anything is actually
- * worth an operator's attention this run.
+ * TASK-OPS-MONITORING-001 (hardened in TASK-OPS-MONITORING-001A - see the
+ * three numbered fixes called out inline below). The decision logic behind
+ * `platform:production:monitor` - reuses `ProductionReadinessCheck::
+ * collectResults()` verbatim (never re-implements a single check, never
+ * parses console output) and decides, against the LAST PERSISTED state,
+ * whether anything is actually worth an operator's attention this run.
  *
  * Rules (task instruction, restated as code):
  * - INFO/PASS are never incidents.
@@ -50,9 +53,25 @@ use Throwable;
  * `last_notified_at` - the fields that suppress future duplicate sends -
  * are only ever advanced AFTER `Mail::send()` returns without throwing.
  * A failed send leaves every queued notification's tracking exactly as it
- * was before this run, so the next scheduled invocation (5 minutes later,
- * per the documented cron interval) naturally retries the SAME batch -
- * this is the "retry", not an in-process retry/backoff loop.
+ * was before this run, so the next scheduled invocation naturally retries
+ * the SAME batch - this is the "retry", not an in-process retry/backoff
+ * loop.
+ *
+ * TASK-OPS-MONITORING-001A fix 3 - "Production monitor" is now a
+ * PERMANENT, always-present 20th pseudo-check, alongside the real 19:
+ * PASS whenever `collectResults()` returns a valid result set, FAIL
+ * (via `syntheticFailureResult()`) whenever it throws OR returns
+ * something invalid (empty, or duplicate check labels - see
+ * `assertValidResults()`). This is what makes a monitor-level failure
+ * behave EXACTLY like any other tracked incident - notified once as
+ * 'new', reminded on the same interval if still failing, and explicitly
+ * 'recovered' the moment collection succeeds again - instead of silently
+ * vanishing from the result set the instant collection resumes. On a
+ * monitor-level failure, the real 19 checks are simply NOT OBSERVED this
+ * run: their prior bookkeeping is carried forward into `$newChecks`
+ * UNCHANGED (never reset, never re-notified, never reinterpreted as
+ * healthy - task instruction: "do not interpret unknown/unobserved
+ * checks as healthy").
  *
  * Exactly ONE email per run covering every notification decided this run
  * (never one email per check) - see `Platform\Tenancy\Mail\
@@ -60,6 +79,8 @@ use Throwable;
  */
 final class ProductionMonitorRunner
 {
+    private const MONITOR_CHECK_LABEL = 'Production monitor';
+
     public function __construct(
         private readonly ProductionReadinessCheck $readinessCheck,
         private readonly ProductionMonitorState $state,
@@ -74,24 +95,69 @@ final class ProductionMonitorRunner
     public function run(bool $dryRun = false): ProductionMonitorOutcome
     {
         $now = CarbonImmutable::now();
-        $prior = $this->state->read();
-        $priorChecks = $prior['checks'];
 
+        // TASK-OPS-MONITORING-001A fix 3: reading prior state can itself
+        // fail (an unsafe/unreadable configured path - see
+        // ProductionMonitorState::assertSafeDirectory()) - this must be a
+        // monitor failure like any other, never an uncaught crash, and
+        // must never be treated as "no prior state, therefore everything
+        // is brand new" if state genuinely exists but could not be read
+        // this run. A read failure carries forward NOTHING (there is
+        // nothing safe to carry forward) - it degrades to the same
+        // behavior as collectResults() failing.
+        $priorChecks = [];
         $monitorException = null;
 
         try {
-            $results = $this->readinessCheck->collectResults();
+            $prior = $this->state->read();
+            $priorChecks = $prior['checks'];
         } catch (Throwable $e) {
             $monitorException = $e;
-            $results = [$this->syntheticFailureResult($e)];
         }
 
-        $newChecks = [];
+        $realResults = [];
+
+        if ($monitorException === null) {
+            try {
+                $realResults = $this->readinessCheck->collectResults();
+                $this->assertValidResults($realResults);
+            } catch (Throwable $e) {
+                $monitorException = $e;
+                $realResults = [];
+            }
+        }
+
+        // The "Production monitor" pseudo-check - always present, see
+        // class docblock. Feeds through the exact same processOne()
+        // pipeline as any real check, which is what gives it new/
+        // changed/reminder/recovered semantics for free.
+        $monitorCheckResult = $monitorException === null
+            ? new ReadinessCheckResult(self::MONITOR_CHECK_LABEL, ReadinessStatus::Pass, 'platform:production:check completed successfully.')
+            : $this->syntheticFailureResult($monitorException);
+
+        $results = [...$realResults, $monitorCheckResult];
+
+        // TASK-OPS-MONITORING-001A fix 3: start from a COPY of everything
+        // already known, not an empty array - a check genuinely not
+        // observed this run (collection failed before reaching it) keeps
+        // its exact prior bookkeeping untouched. processOne() below only
+        // ever overwrites the entries for checks actually present in
+        // $results this run.
+        $newChecks = $priorChecks;
         $notifications = [];
 
         foreach ($results as $result) {
             $this->processOne($result, $priorChecks[$result->check] ?? null, $now, $newChecks, $notifications);
         }
+
+        // TASK-OPS-MONITORING-001A fix 2: surfaced BEFORE deciding whether
+        // to attempt delivery, and independent of whether any check is
+        // currently WARN/FAIL - an operator must never see "all healthy,
+        // nothing to notify" while alerting is enabled but structurally
+        // unable to ever fire (task instruction: "Validate required
+        // enabled configuration before deciding whether incidents need
+        // notification... looks healthy when all checks pass").
+        $configurationProblem = $this->configurationProblem();
 
         $deliverySkippedReason = null;
         $sent = false;
@@ -99,6 +165,8 @@ final class ProductionMonitorRunner
         if ($notifications !== [] && ! $dryRun) {
             if (! (bool) config('platform-monitoring.enabled', false)) {
                 $deliverySkippedReason = 'monitoring alerts disabled (MONITOR_ALERT_ENABLED is not true) - no mail sent.';
+            } elseif ($configurationProblem !== null) {
+                $deliverySkippedReason = $configurationProblem;
             } else {
                 [$sent, $deliverySkippedReason] = $this->deliver($notifications);
 
@@ -109,17 +177,57 @@ final class ProductionMonitorRunner
         }
 
         if (! $dryRun) {
-            $this->state->write([
-                'checks' => $newChecks,
-                'meta' => [
-                    'last_run_at' => $now->toIso8601String(),
-                    'last_monitor_error' => $monitorException !== null ? $this->describe($monitorException) : null,
-                    'last_delivery_skip_reason' => $deliverySkippedReason,
-                ],
-            ]);
+            try {
+                $this->state->write([
+                    'checks' => $newChecks,
+                    'meta' => [
+                        'last_run_at' => $now->toIso8601String(),
+                        'last_monitor_error' => $monitorException !== null ? $this->describe($monitorException) : null,
+                        'last_delivery_skip_reason' => $deliverySkippedReason,
+                        'configuration_error' => $configurationProblem,
+                    ],
+                ]);
+            } catch (Throwable $e) {
+                // A write failure (the same unsafe-path/permission class of
+                // problem read() above already guards against, or a
+                // genuinely full disk) must not crash this method - the
+                // run's own in-memory outcome is still returned, correctly
+                // reported, and correctly fails the command's exit code,
+                // it just could not be durably recorded this time.
+                $monitorException ??= $e;
+            }
         }
 
-        return new ProductionMonitorOutcome($results, $notifications, $sent, $deliverySkippedReason, $monitorException, $dryRun);
+        return new ProductionMonitorOutcome($results, $notifications, $sent, $deliverySkippedReason, $monitorException, $dryRun, $configurationProblem);
+    }
+
+    /**
+     * TASK-OPS-MONITORING-001A fix 3. `collectResults()` succeeding
+     * without throwing is not, on its own, proof of a usable result -
+     * task instruction: "Reject empty, malformed, or duplicate-key result
+     * sets as monitor failures rather than successful empty runs."
+     *
+     * @param  array<int, ReadinessCheckResult>  $results
+     */
+    private function assertValidResults(array $results): void
+    {
+        if ($results === []) {
+            throw new RuntimeException('platform:production:check returned an empty result set.');
+        }
+
+        $seen = [];
+
+        foreach ($results as $result) {
+            if (! $result instanceof ReadinessCheckResult) {
+                throw new RuntimeException('platform:production:check returned a malformed result entry.');
+            }
+
+            if (isset($seen[$result->check])) {
+                throw new RuntimeException("platform:production:check returned a duplicate check label [{$result->check}].");
+            }
+
+            $seen[$result->check] = true;
+        }
     }
 
     /**
@@ -137,7 +245,7 @@ final class ProductionMonitorRunner
                     'check' => $result->check,
                     'reason' => 'recovered',
                     'status' => $result->status->value,
-                    'detail' => $result->detail,
+                    'detail' => NotificationRedactor::redact($result->detail),
                     'since' => $now->toIso8601String(),
                 ];
 
@@ -185,7 +293,7 @@ final class ProductionMonitorRunner
                 'check' => $result->check,
                 'reason' => $reason,
                 'status' => $result->status->value,
-                'detail' => $result->detail,
+                'detail' => NotificationRedactor::redact($result->detail),
                 'since' => $since,
             ];
         }
@@ -232,25 +340,60 @@ final class ProductionMonitorRunner
     }
 
     /**
+     * TASK-OPS-MONITORING-001A fix 2. Checked BEFORE any delivery attempt
+     * and, separately, unconditionally every run (see `run()`) - the one
+     * shared source of truth for "is this enabled configuration usable at
+     * all," so `configurationProblem()`/`deliver()` can never disagree.
+     * Purely local validation (`filter_var(..., FILTER_VALIDATE_EMAIL)`) -
+     * task instruction: "Validate recipient syntax locally without
+     * contacting an external service." Returns null when disabled -
+     * an unset/invalid recipient is only a problem once alerting is
+     * actually turned on.
+     */
+    private function configurationProblem(): ?string
+    {
+        if (! (bool) config('platform-monitoring.enabled', false)) {
+            return null;
+        }
+
+        $recipient = trim((string) config('platform-monitoring.recipient', ''));
+
+        if ($recipient === '') {
+            return 'MONITOR_ALERT_ENABLED is true but MONITOR_ALERT_RECIPIENT is not configured - alerting cannot fire.';
+        }
+
+        if (filter_var($recipient, FILTER_VALIDATE_EMAIL) === false) {
+            return 'MONITOR_ALERT_ENABLED is true but MONITOR_ALERT_RECIPIENT does not look like a valid email address - alerting cannot fire.';
+        }
+
+        return null;
+    }
+
+    /**
      * Exactly one send attempt, one email, always the plain `smtp` mailer
      * (see `ProductionAlertMail`'s own constructor). No in-process retry -
-     * see class docblock. Returns [delivered, skipReason|null].
+     * see class docblock. Returns [delivered, skipReason|null]. Never
+     * called once `configurationProblem()` has already returned non-null
+     * (see `run()`) - this method's own recipient checks are a second,
+     * independent layer, not the only one.
      *
      * @param  array<int, array{check: string, reason: string, status: string, detail: string, since: string}>  $notifications
      * @return array{0: bool, 1: string|null}
      */
     private function deliver(array $notifications): array
     {
-        $recipient = trim((string) config('platform-monitoring.recipient', ''));
+        $problem = $this->configurationProblem();
 
-        if ($recipient === '') {
+        if ($problem !== null) {
             // Task instruction: "Missing required configuration must be
             // visible when monitoring is explicitly enabled; do not
             // silently claim successful delivery." Returned, never thrown -
             // this is an expected, reportable configuration state, not a
             // monitor crash.
-            return [false, 'MONITOR_ALERT_RECIPIENT is not configured - enabled but no operator recipient set, cannot send.'];
+            return [false, $problem];
         }
+
+        $recipient = trim((string) config('platform-monitoring.recipient', ''));
 
         // Bounds this one delivery attempt (task instruction: "Bound
         // mail-delivery timeouts and retries") - the plain `smtp` mailer's
@@ -282,27 +425,85 @@ final class ProductionMonitorRunner
         return [true, null];
     }
 
+    /**
+     * TASK-OPS-MONITORING-001A fix 5. `platform:production:monitor
+     * --test-notification` - a deliberately-invoked, explicit path to
+     * prove real delivery works, using the SAME configured recipient and
+     * central `smtp` mailer as any real alert, WITHOUT running a single
+     * readiness check and WITHOUT touching `state.json` at all - no real
+     * incident's `since`/reminder/recovery bookkeeping is affected in any
+     * way (task instruction: "not change real incident delivery
+     * history"). Still gated by the exact same `configurationProblem()`
+     * check as a real alert - opt-in requirements are never bypassed just
+     * because this was manually requested.
+     *
+     * @return array{0: bool, 1: string|null}
+     */
+    public function sendTestNotification(): array
+    {
+        // Explicit, independent of configurationProblem()'s own "only a
+        // problem once alerting is actually turned on" rule (which
+        // deliberately returns null while disabled, for the NORMAL
+        // run() path - see that method's own docblock) - a manually
+        // requested test send must never become a backdoor around the
+        // opt-in requirement itself. Task instruction: "respect opt-in
+        // requirements."
+        if (! (bool) config('platform-monitoring.enabled', false)) {
+            return [false, 'MONITOR_ALERT_ENABLED is not true - enable monitoring before requesting a test notification.'];
+        }
+
+        $problem = $this->configurationProblem();
+
+        if ($problem !== null) {
+            return [false, $problem];
+        }
+
+        $recipient = trim((string) config('platform-monitoring.recipient', ''));
+        config(['mail.mailers.smtp.timeout' => max(1, (int) config('platform-monitoring.mail_timeout_seconds', 10))]);
+
+        $testNotification = [
+            'check' => 'Test notification',
+            'reason' => 'test',
+            'status' => 'info',
+            'detail' => 'This is a manually-triggered test from platform:production:monitor --test-notification. '
+                .'No readiness check was run and no incident/reminder/recovery state was changed.',
+            'since' => CarbonImmutable::now()->toIso8601String(),
+        ];
+
+        try {
+            Mail::mailer('smtp')->to($recipient)->send(new ProductionAlertMail([$testNotification], (string) config('app.name', 'Technify')));
+        } catch (Throwable $e) {
+            return [false, $this->describe($e)];
+        }
+
+        return [true, null];
+    }
+
     private function syntheticFailureResult(Throwable $e): ReadinessCheckResult
     {
         return new ReadinessCheckResult(
-            'Production monitor',
+            self::MONITOR_CHECK_LABEL,
             ReadinessStatus::Fail,
-            'platform:production:check itself threw an exception and could not complete: '.$this->describe($e)
+            'platform:production:check itself could not complete: '.$this->describe($e)
         );
     }
 
     /**
-     * Class + a truncated, whitespace-collapsed message - deliberately
-     * never a stack trace (task instruction: "Avoid ... raw exception
-     * dumps ... in notifications or persistent monitoring state"). The
-     * full exception is still visible via Laravel's own normal error
-     * log (unaffected by anything in this class), for a human who needs
-     * it.
+     * TASK-OPS-MONITORING-001A fix 1. Deliberately NEVER includes
+     * `$e->getMessage()` - task instruction: "Use safe exception summaries
+     * without arbitrary exception messages." An arbitrary caught exception
+     * (`collectResults()` can throw literally anything from anywhere in
+     * the app; a delivery exception could include SMTP-server-supplied
+     * text) is fundamentally unbounded input this class cannot safely
+     * curate - only the exception's own CLASS name is included, never its
+     * message or trace. The full exception, with its real message and
+     * stack trace, still reaches Laravel's own normal error log
+     * (unaffected by anything in this class) for a human who needs it -
+     * only THIS notification/persisted-state boundary is deliberately
+     * blind to the message text.
      */
     private function describe(Throwable $e): string
     {
-        $message = preg_replace('/\s+/', ' ', $e->getMessage()) ?? '';
-
-        return Str::limit($e::class.': '.$message, 300);
+        return Str::limit($e::class.' (see application log for details)', 300);
     }
 }

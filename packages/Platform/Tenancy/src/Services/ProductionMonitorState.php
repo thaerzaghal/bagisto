@@ -7,11 +7,12 @@ namespace Platform\Tenancy\Services;
 use RuntimeException;
 
 /**
- * TASK-OPS-MONITORING-001. Plain filesystem I/O for `platform:production:
- * monitor`'s own bounded operational state - deliberately the ONLY class
- * in this feature that touches a filesystem path directly, so
- * `ProductionMonitorRunner` (the decision logic) can be tested against a
- * plain in-memory array without ever touching disk.
+ * TASK-OPS-MONITORING-001 (path safety hardened in TASK-OPS-MONITORING-001A).
+ * Plain filesystem I/O for `platform:production:monitor`'s own bounded
+ * operational state - deliberately the ONLY class in this feature that
+ * touches a filesystem path directly, so `ProductionMonitorRunner` (the
+ * decision logic) can be tested against a plain in-memory array without
+ * ever touching disk.
  *
  * Never a database migration, never Redis (task instruction: "do not
  * require a database migration or Redis availability merely to remember
@@ -35,13 +36,26 @@ use RuntimeException;
  *   },
  *   "meta": {
  *     "last_run_at": "<ISO-8601>",
- *     "last_error": "<bounded, generic string>"|null
+ *     "last_monitor_error": "<bounded, class-only string>"|null,
+ *     "last_delivery_skip_reason": "<bounded string>"|null,
+ *     "configuration_error": "<bounded string>"|null
  *   }
  * }
  * ```
  */
 final class ProductionMonitorState
 {
+    /**
+     * TASK-OPS-MONITORING-001A. A real, reproduced finding: `.env.example`
+     * ships `MONITOR_STATE_PATH=` (present, blank) - `env('MONITOR_STATE_PATH',
+     * $default)` returns that blank STRING, not `$default` (`env()` only
+     * falls back on a genuinely UNSET variable, never an empty one) - see
+     * `config/platform-monitoring.php`'s own fix for the config-level half
+     * of this. This class's OWN half: never trust the resolved value is
+     * non-empty/safe just because config() returned something - reject an
+     * unsafe path here too, as a second, independent layer, before any
+     * filesystem operation.
+     */
     public function __construct(private readonly string $directory) {}
 
     public function stateFilePath(): string
@@ -56,6 +70,8 @@ final class ProductionMonitorState
 
     public function ensureDirectoryExists(): void
     {
+        $this->assertSafeDirectory();
+
         $directory = $this->normalizedDirectory();
 
         if (! is_dir($directory) && ! mkdir($directory, 0750, true) && ! is_dir($directory)) {
@@ -69,10 +85,21 @@ final class ProductionMonitorState
      * way: an empty baseline, not a monitor crash. Corruption is
      * self-healing on the very next successful write.
      *
+     * TASK-OPS-MONITORING-001A: also validates each INDIVIDUAL check entry
+     * has the expected shape, not just that the top-level JSON parsed -
+     * a malformed single entry (e.g. hand-edited, or written by a future
+     * incompatible version of this class) is dropped, never allowed to
+     * crash `ProductionMonitorRunner::processOne()` outside this class's
+     * own controlled failure handling (task instruction: "Validate
+     * persisted state shape safely where needed; do not let malformed
+     * entries crash outside failure handling").
+     *
      * @return array{checks: array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>, meta: array<string, mixed>}
      */
     public function read(): array
     {
+        $this->assertSafeDirectory();
+
         $path = $this->stateFilePath();
 
         if (! is_file($path)) {
@@ -86,7 +113,7 @@ final class ProductionMonitorState
         }
 
         return [
-            'checks' => $decoded['checks'],
+            'checks' => $this->sanitizeChecks($decoded['checks']),
             'meta' => is_array($decoded['meta'] ?? null) ? $decoded['meta'] : [],
         ];
     }
@@ -120,8 +147,76 @@ final class ProductionMonitorState
         rename($temp, $path);
     }
 
+    /**
+     * @param  array<string, mixed>  $checks
+     * @return array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>
+     */
+    private function sanitizeChecks(array $checks): array
+    {
+        $clean = [];
+
+        foreach ($checks as $label => $entry) {
+            if (! is_string($label) || $label === '' || ! is_array($entry)) {
+                continue;
+            }
+
+            if (! isset($entry['status']) || ! is_string($entry['status'])) {
+                continue;
+            }
+
+            if (! isset($entry['since']) || ! is_string($entry['since'])) {
+                continue;
+            }
+
+            $lastNotifiedStatus = $entry['last_notified_status'] ?? null;
+            $lastNotifiedAt = $entry['last_notified_at'] ?? null;
+
+            if ($lastNotifiedStatus !== null && ! is_string($lastNotifiedStatus)) {
+                continue;
+            }
+
+            if ($lastNotifiedAt !== null && ! is_string($lastNotifiedAt)) {
+                continue;
+            }
+
+            $clean[$label] = [
+                'status' => $entry['status'],
+                'since' => $entry['since'],
+                'last_notified_status' => $lastNotifiedStatus,
+                'last_notified_at' => $lastNotifiedAt,
+            ];
+        }
+
+        return $clean;
+    }
+
     private function normalizedDirectory(): string
     {
         return rtrim($this->directory, '/');
+    }
+
+    /**
+     * TASK-OPS-MONITORING-001A. Rejects a blank, whitespace-only, relative,
+     * or filesystem-root(-ish) path BEFORE any filesystem operation is
+     * ever attempted - task instruction: "Reject unsafe/invalid resolved
+     * paths before filesystem operations. Do not change backup ownership/
+     * permissions or write at filesystem root." Deliberately simple,
+     * string-level rules only (no `realpath()` - the directory frequently
+     * does not exist yet on first run, which `realpath()` cannot resolve
+     * at all): non-empty after trimming, absolute (`/`-prefixed - a
+     * relative path is ambiguous under cron, where the working directory
+     * is not guaranteed), and not itself the bare root or a root-only
+     * sequence of slashes.
+     */
+    private function assertSafeDirectory(): void
+    {
+        $trimmed = trim($this->directory);
+        $normalized = rtrim($trimmed, '/');
+
+        if ($trimmed === '' || $normalized === '' || $trimmed[0] !== '/') {
+            throw new RuntimeException(
+                "Refusing to use monitoring state path [{$this->directory}] - it must be a non-empty, absolute path, never the filesystem root. Check MONITOR_STATE_PATH/BACKUP_ROOT."
+            );
+        }
     }
 }
