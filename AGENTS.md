@@ -185,3 +185,10 @@ php artisan db:seed              # Seed database
 4. No `env()` calls outside `config/` files
 5. New models have Contract + Model + Proxy + Repository
 6. New packages registered in `bootstrap/providers.php` and `config/concord.php`
+
+## Codex Reviewer Workflow
+
+Only when Codex is explicitly acting as Technify's Technical/Product Reviewer,
+read and follow `CODEX_REVIEWER.md` alongside this file.
+Otherwise, this section adds no instructions. All existing AGENTS.md rules
+remain unchanged.
