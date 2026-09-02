@@ -45,6 +45,21 @@ class ProductionMonitor extends Command
 
     public function handle(ProductionMonitorRunner $runner, ProductionMonitorState $state): int
     {
+        // TASK-OPS-MONITORING-001B finding 1: checked FIRST, before any
+        // filesystem operation (the lock file included) or delivery
+        // attempt - a real, reproduced defect: with BOTH flags present,
+        // the previous version checked --test-notification before
+        // --dry-run and silently sent a real test email despite --dry-run
+        // being requested. The two flags express mutually exclusive
+        // intents (preview nothing-sent vs. deliberately send one email)
+        // - reject the combination outright rather than silently
+        // prioritizing either one.
+        if ((bool) $this->option('dry-run') && (bool) $this->option('test-notification')) {
+            $this->error('--dry-run and --test-notification cannot be combined - --dry-run previews without sending mail, --test-notification deliberately sends one. Use exactly one of the two.');
+
+            return self::INVALID;
+        }
+
         try {
             $lockHandle = $this->openLockFile($state);
         } catch (Throwable $e) {
@@ -57,6 +72,10 @@ class ProductionMonitor extends Command
             // "do not assume existing console output is safe" principle
             // this task applied to the notification/state boundary
             // applies to this command's own console output too.
+            // TASK-OPS-MONITORING-001B fix 4: report() makes the
+            // "(see application log for details)" text below actually
+            // true, rather than an unbacked claim.
+            report($e);
             $this->error('Could not open the monitor lock file: '.$e::class.' (see application log for details).');
 
             return self::FAILURE;
@@ -171,6 +190,13 @@ class ProductionMonitor extends Command
 
         if ($outcome->monitorException !== null) {
             $this->error('platform:production:check itself could not complete - treated as a monitor failure, not a healthy run.');
+        }
+
+        if ($outcome->corruptedEntriesDropped > 0) {
+            // TASK-OPS-MONITORING-001B fix 3: a count only, never the
+            // dropped entries' own content - see ProductionMonitorOutcome's
+            // own docblock.
+            $this->comment("{$outcome->corruptedEntriesDropped} persisted check entry(ies) failed validation and were dropped from monitoring state.");
         }
 
         if ($outcome->configurationProblem !== null) {

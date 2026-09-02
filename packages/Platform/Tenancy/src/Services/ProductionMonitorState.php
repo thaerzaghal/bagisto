@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Platform\Tenancy\Services;
 
+use Carbon\CarbonImmutable;
+use Platform\Tenancy\Support\ReadinessStatus;
 use RuntimeException;
+use Throwable;
 
 /**
  * TASK-OPS-MONITORING-001 (path safety hardened in TASK-OPS-MONITORING-001A).
@@ -80,21 +83,44 @@ final class ProductionMonitorState
     }
 
     /**
-     * Never throws on a missing/corrupt file - a first-ever run (no state
-     * file yet) and a genuinely corrupted one are both treated the same
-     * way: an empty baseline, not a monitor crash. Corruption is
-     * self-healing on the very next successful write.
+     * A missing file (first-ever run - nothing has ever been written yet)
+     * is a safe empty baseline. TASK-OPS-MONITORING-001B fix 3: a file
+     * that EXISTS but is not valid/readable JSON in the expected top-level
+     * shape now THROWS instead of silently returning that same empty
+     * baseline - a real, reproduced problem with the previous behavior:
+     * treating "nothing has ever run" and "something real is on disk and
+     * unreadable" identically meant `ProductionMonitorRunner::run()` would
+     * go on to `write()` a fresh near-empty state directly over a
+     * genuinely corrupt file, permanently destroying whatever incident
+     * history it held (task instruction: "do not silently overwrite
+     * unreadable state with a fresh baseline"). The two cases are now
+     * distinguished; `run()` treats this exception like any other monitor
+     * failure and deliberately skips its own final `write()` call when it
+     * occurs, leaving the file exactly as found for a human to inspect.
      *
-     * TASK-OPS-MONITORING-001A: also validates each INDIVIDUAL check entry
-     * has the expected shape, not just that the top-level JSON parsed -
-     * a malformed single entry (e.g. hand-edited, or written by a future
-     * incompatible version of this class) is dropped, never allowed to
-     * crash `ProductionMonitorRunner::processOne()` outside this class's
-     * own controlled failure handling (task instruction: "Validate
-     * persisted state shape safely where needed; do not let malformed
-     * entries crash outside failure handling").
+     * TASK-OPS-MONITORING-001A (hardened in 001B): also validates each
+     * INDIVIDUAL check entry SEMANTICALLY, not merely its PHP type - a
+     * real, reproduced finding showed a `status`/`last_notified_status`
+     * of any string, or a `last_notified_at`/`since` of any string
+     * (including one that is not a parseable timestamp at all, e.g.
+     * `"NOT_A_DATE"`), previously passed validation here and only failed
+     * much later, outside this class's controlled failure handling, when
+     * `CarbonImmutable::parse()` finally choked on it. `sanitizeChecks()`
+     * below now additionally rejects: a `status`/`last_notified_status`
+     * that is not a real `ReadinessStatus` value; a `since`/
+     * `last_notified_at` that does not actually parse as a timestamp; a
+     * `last_notified_status` that is not itself a WARN/FAIL-shaped status
+     * (PASS/INFO is never what this class itself writes there); and a
+     * `last_notified_status`/`last_notified_at` pair that is not both-null
+     * or both-non-null (the only shape this class or `ProductionMonitorRunner`
+     * ever produces). A failing entry is DROPPED, never fatal to the run
+     * (task instruction: "do not let malformed entries crash outside
+     * failure handling") - every OTHER valid entry is preserved untouched
+     * (task instruction: "preserve valid unrelated incident history"), and
+     * the number dropped is returned as a plain count so a caller can make
+     * corruption visible without ever exposing raw file content.
      *
-     * @return array{checks: array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>, meta: array<string, mixed>}
+     * @return array{checks: array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>, meta: array<string, mixed>, dropped_entries: int}
      */
     public function read(): array
     {
@@ -103,18 +129,21 @@ final class ProductionMonitorState
         $path = $this->stateFilePath();
 
         if (! is_file($path)) {
-            return ['checks' => [], 'meta' => []];
+            return ['checks' => [], 'meta' => [], 'dropped_entries' => 0];
         }
 
         $decoded = json_decode((string) file_get_contents($path), true);
 
         if (! is_array($decoded) || ! isset($decoded['checks']) || ! is_array($decoded['checks'])) {
-            return ['checks' => [], 'meta' => []];
+            throw new RuntimeException("Monitoring state file [{$path}] exists but is not valid JSON in the expected shape - refusing to treat it as an empty baseline (that would silently discard it on the next write). See application log for the raw parse failure; the state file's own contents are not included here.");
         }
 
+        [$checks, $dropped] = $this->sanitizeChecks($decoded['checks']);
+
         return [
-            'checks' => $this->sanitizeChecks($decoded['checks']),
+            'checks' => $checks,
             'meta' => is_array($decoded['meta'] ?? null) ? $decoded['meta'] : [],
+            'dropped_entries' => $dropped,
         ];
     }
 
@@ -149,34 +178,72 @@ final class ProductionMonitorState
 
     /**
      * @param  array<string, mixed>  $checks
-     * @return array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>
+     * @return array{0: array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>, 1: int}
      */
     private function sanitizeChecks(array $checks): array
     {
         $clean = [];
+        $dropped = 0;
 
         foreach ($checks as $label => $entry) {
             if (! is_string($label) || $label === '' || ! is_array($entry)) {
+                $dropped++;
+
                 continue;
             }
 
-            if (! isset($entry['status']) || ! is_string($entry['status'])) {
+            if (! isset($entry['status']) || ! is_string($entry['status']) || ReadinessStatus::tryFrom($entry['status']) === null) {
+                $dropped++;
+
                 continue;
             }
 
-            if (! isset($entry['since']) || ! is_string($entry['since'])) {
+            if (! isset($entry['since']) || ! is_string($entry['since']) || ! $this->isValidTimestamp($entry['since'])) {
+                $dropped++;
+
                 continue;
             }
 
             $lastNotifiedStatus = $entry['last_notified_status'] ?? null;
             $lastNotifiedAt = $entry['last_notified_at'] ?? null;
 
-            if ($lastNotifiedStatus !== null && ! is_string($lastNotifiedStatus)) {
+            // The only shape this class (via ProductionMonitorRunner::
+            // commitDelivery()/processOne()) ever actually writes: both
+            // null (never notified, or just recovered back to a clean
+            // slate) or both non-null (a real, previously delivered
+            // notification) - never one without the other.
+            if (($lastNotifiedStatus === null) !== ($lastNotifiedAt === null)) {
+                $dropped++;
+
                 continue;
             }
 
-            if ($lastNotifiedAt !== null && ! is_string($lastNotifiedAt)) {
-                continue;
+            if ($lastNotifiedStatus !== null) {
+                if (! is_string($lastNotifiedStatus)) {
+                    $dropped++;
+
+                    continue;
+                }
+
+                $notifiedStatus = ReadinessStatus::tryFrom($lastNotifiedStatus);
+
+                // last_notified_status only ever records a status this
+                // class actually NOTIFIED about - always an incident
+                // (WARN/FAIL); PASS/INFO here cannot correspond to any
+                // real prior send.
+                if ($notifiedStatus === null || ! $notifiedStatus->isIncident()) {
+                    $dropped++;
+
+                    continue;
+                }
+            }
+
+            if ($lastNotifiedAt !== null) {
+                if (! is_string($lastNotifiedAt) || ! $this->isValidTimestamp($lastNotifiedAt)) {
+                    $dropped++;
+
+                    continue;
+                }
             }
 
             $clean[$label] = [
@@ -187,7 +254,31 @@ final class ProductionMonitorState
             ];
         }
 
-        return $clean;
+        return [$clean, $dropped];
+    }
+
+    /**
+     * `CarbonImmutable::parse()` throws `InvalidFormatException` (a real,
+     * reproduced finding - TASK-OPS-MONITORING-001B finding 3) on a string
+     * that is not a real timestamp at all (e.g. `"NOT_A_DATE"`) - a case
+     * `is_string()` alone can never catch. An empty/whitespace-only string
+     * is rejected explicitly first: `strtotime('')` (which `Carbon::parse()`
+     * falls back to for some inputs) does not reliably throw for it, but it
+     * is never a value this class itself writes.
+     */
+    private function isValidTimestamp(string $value): bool
+    {
+        if (trim($value) === '') {
+            return false;
+        }
+
+        try {
+            CarbonImmutable::parse($value);
+
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     private function normalizedDirectory(): string

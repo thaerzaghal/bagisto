@@ -1,9 +1,9 @@
 # Technify — Current Project State
 
-**Last reviewed:** 2026-08-31
+**Last reviewed:** 2026-09-03
 **Branch:** 2.4
 **Status:** Living Document
-**Source:** TASK-PROJECT-STATE-001 (architecture & readiness audit), reconciled by TASK-PROJECT-STATE-002, extended by TASK-OPS-MONITORING-001 and its own review-and-fix pass TASK-OPS-MONITORING-001A (production monitoring/alerting — implemented, reviewed, hardened, locally tested, see §12/§19.1; not yet deployed or activated)
+**Source:** TASK-PROJECT-STATE-001 (architecture & readiness audit), reconciled by TASK-PROJECT-STATE-002, extended by TASK-OPS-MONITORING-001 and two subsequent review-and-fix passes, TASK-OPS-MONITORING-001A and TASK-OPS-MONITORING-001B (production monitoring/alerting — implemented, reviewed, hardened twice, locally tested, see §12/§19.1; not yet deployed or activated)
 
 **Evidence scope:** Production-verification labels retain the dated evidence
 from the original audit and closing tasks. This reconciliation follow-up
@@ -585,7 +585,7 @@ decisions, not follow-up work.
 | Daily local backup, offsite sync to Cloudflare R2, checksum-verified restore drill | **PRODUCTION VERIFIED** — proven via a real restore drill against disposable databases, and via this project's own TASK-PILOT-003A backup run |
 | `platform:production:check` readiness gate (19 checks in current source) | **PRODUCTION VERIFIED** — gates `deploy.sh`'s own exit code |
 | Structured/per-tenant logging | **PARTIAL** — per-tenant log files exist as a side effect of filesystem isolation (`storage/tenant{id}/logs`), not a deliberate observability design |
-| Proactive alerting (a human is notified when a check fails) | **IMPLEMENTED, REVIEWED, HARDENED — NOT DEPLOYED, NOT PRODUCTION VERIFIED** (TASK-OPS-MONITORING-001, hardened by TASK-OPS-MONITORING-001A) — see below |
+| Proactive alerting (a human is notified when a check fails) | **IMPLEMENTED, REVIEWED, HARDENED TWICE — NOT DEPLOYED, NOT PRODUCTION VERIFIED** (TASK-OPS-MONITORING-001, hardened by TASK-OPS-MONITORING-001A, then TASK-OPS-MONITORING-001B) — see below |
 
 **Health checking vs. monitoring/alerting — narrowed, not yet closed.**
 `platform:production:check` is thorough and battle-tested, but on its own
@@ -624,12 +624,33 @@ level collection failure erased every other check's tracked history and
 never generated its own recovery notice; and the documented execution
 bound relied on mail/HTTP timeouts alone, which do not cover every
 internal call (Redis has no explicit client-level bound in this project's
-source configuration). All five are fixed and covered by dedicated
-regression tests (43 total: `tests/Feature/Platform/ProductionMonitorTest.php`,
+source configuration).
+
+**A SECOND review pass (TASK-OPS-MONITORING-001B) found four more real,
+since-fixed defects in that same, already-hardened code** — the pattern of
+"reviewed once, found nothing more" did not hold twice in a row, so this
+document continues to avoid claiming closure: `--dry-run` and
+`--test-notification` could be combined and the command would silently
+send a real email despite `--dry-run` being requested; `NotificationRedactor`'s
+regex-based secret redaction (fix 1's own remediation) could itself be
+bypassed by shapes it did not recognize (a JSON-shaped secret, a
+space-containing `key="value"` secret, an `Authorization: Basic ...`
+header) — replaced with a structural guarantee (free-form check `detail`
+text is never forwarded to a real notification at all, not merely
+pattern-filtered); a persisted state entry was validated only by PHP type,
+not semantically, so an invalid status or an unparseable timestamp string
+could pass validation and later throw outside controlled failure handling,
+and a state file that existed but failed to parse was silently overwritten
+with a fresh baseline by the very next run instead of being treated as a
+monitor failure; and a docblock claimed a caught exception automatically
+reached Laravel's own log, which the code did not actually do (it now
+does, via `report()`, at every catch site). All nine defects across both
+passes are fixed and covered by dedicated regression tests (56 total:
+`tests/Feature/Platform/ProductionMonitorTest.php`,
 `ProductionMonitorTimeoutTest.php`) plus one manual, local-only
 verification against Mailpit (never a real send). This document does not
 claim the implementation is now "fully reviewed, only activation remains"
-— a second pass already found real problems once; see
+— two separate passes have each already found real problems; see
 `docs/architecture/production-deployment.md` "Monitoring / alerting" for
 the full mechanism, configuration, the execution-user pre-flight
 verification (not a default-to-root recommendation), the prepared
@@ -810,7 +831,7 @@ enterprise features.
 
 | Item | Who needs it | Scope | Classification |
 |---|---|---|---|
-| Deploy + activate `platform:production:monitor` against real production (implemented, reviewed, hardened, tested locally, TASK-OPS-MONITORING-001/001A — see §12) | Operator | S (deploy + the documented multi-step activation procedure, including a pre-flight execution-user check and a real container recreation) | Scale readiness |
+| Deploy + activate `platform:production:monitor` against real production (implemented, reviewed, hardened twice, tested locally, TASK-OPS-MONITORING-001/001A/001B — see §12) | Operator | S (deploy + the documented multi-step activation procedure, including a pre-flight execution-user check and a real container recreation) | Scale readiness |
 | Tenant deletion / export / offboarding lifecycle | Operator | L | Scale readiness |
 | Platform Admin RBAC + action audit log | Operator | M | Scale readiness |
 | Scheduled, unattended backup restore-verification | Operator | S | Scale readiness |
@@ -837,16 +858,28 @@ merchants safely.
 
 ### 1. Deploy and activate production monitoring & alerting — Size S
 - **Status**: the mechanism is **built, locally tested, and has already
-  been through one review-and-fix cycle** (TASK-OPS-MONITORING-001, then
-  TASK-OPS-MONITORING-001A — five real defects found and fixed before any
-  deployment was considered: secret disclosure at the notification
-  boundary, a configuration-validation gap, incident-history loss through
-  monitor-level failures, no real execution bound, and several activation-
-  instruction inaccuracies; see §12). This is not claimed as a closed,
-  fully-certified implementation — only that this specific list of
-  problems is now fixed and regression-tested (43 tests). A production
-  activation should still budget time for whatever the FIRST real run
-  against production evidence surfaces, not be treated as a formality.
+  been through TWO review-and-fix cycles** (TASK-OPS-MONITORING-001, then
+  TASK-OPS-MONITORING-001A — five real defects found and fixed: secret
+  disclosure at the notification boundary, a configuration-validation gap,
+  incident-history loss through monitor-level failures, no real execution
+  bound, and several activation-instruction inaccuracies — then
+  TASK-OPS-MONITORING-001B, which found and fixed four MORE real defects in
+  that same already-hardened code: an incompatible `--dry-run`/
+  `--test-notification` flag combination could silently send real mail, the
+  original regex-based secret redaction could itself be bypassed by
+  unrecognized shapes (replaced with a structural "never forward detail
+  text" guarantee), persisted state was validated only by PHP type (not
+  semantically, allowing an invalid status or unparseable timestamp
+  through) and a corrupt state file was silently overwritten with a fresh
+  baseline instead of being treated as a failure, and a docblock claim
+  about automatic exception logging did not match what the code actually
+  did; see §12). This is not claimed as a closed, fully-certified
+  implementation — a second pass already found real problems once, so a
+  third should not be assumed impossible — only that this specific list of
+  problems (nine defects across both passes) is now fixed and
+  regression-tested (56 tests). A production activation should still
+  budget time for whatever the FIRST real run against production evidence
+  surfaces, not be treated as a formality.
 - **Why now**: still the single largest gap between "we'd notice a real
   problem" and "a merchant hits a failure before we do."
 - **Outcome**: run the execution-user pre-flight check against real
@@ -950,8 +983,8 @@ Ready, activation email, done. Nothing structural blocks it.
 Nothing structural. The honest risk is operational blindness — no
 *activated* alerting means a real failure (a stale backup, a broken asset)
 is still discovered by luck today, not by the system telling anyone. The
-mechanism to close this is now built, tested, and has been through one
-review-and-fix cycle (TASK-OPS-MONITORING-001/001A, §12/§19.1) but **not
+mechanism to close this is now built, tested, and has been through two
+review-and-fix cycles (TASK-OPS-MONITORING-001/001A/001B, §12/§19.1) but **not
 yet deployed or turned on in production** — the remaining gap is
 deployment/activation, not undesigned engineering, though activation
 should still budget for whatever real production evidence surfaces on
@@ -965,15 +998,16 @@ today; all three become real at that scale.
 
 **6. What is the single most important next task?**
 Deploying and activating production monitoring & alerting (§19.1) —
-**re-confirmed across three passes now, not assumed.** The underlying
+**re-confirmed across four passes now, not assumed.** The underlying
 reasoning has not changed: `platform:production:check` alone remains a
 *pulled* check, and the one place operational discipline could fail
 silently (a missed manual check) stays open in production until this is
 actually turned on. What changed across TASK-OPS-MONITORING-001 and its
-own review pass (TASK-OPS-MONITORING-001A) is that the mechanism moved
-from undesigned work, to built-and-tested, to reviewed-and-hardened
-against five real, since-fixed defects — not to "trivial, nothing left to
-find." The remaining task is deploy, run the execution-user pre-flight
+two own review passes (TASK-OPS-MONITORING-001A, then TASK-OPS-MONITORING-001B)
+is that the mechanism moved from undesigned work, to built-and-tested, to
+reviewed-and-hardened TWICE against nine real, since-fixed defects total —
+not to "trivial, nothing left to find." The remaining task is deploy, run
+the execution-user pre-flight
 check, verify with `--dry-run`, enable (with a real container recreation,
 not just `config:clear`), confirm one real delivery via
 `--test-notification`, and install the prepared, execution-bounded cron
@@ -1022,16 +1056,27 @@ TASK-OPS-MONITORING-001 (2026-08-31), which implemented and locally tested
 a review-and-fix pass that found and corrected five real defects
 (secret disclosure at the notification boundary, a configuration-
 validation gap, incident-history loss through monitor-level failures, no
-real execution bound, and several activation-instruction inaccuracies)
-before any deployment was considered (§12/§19.1). Neither monitoring pass
-deployed, activated, or sent any real notification at any point. No code,
-production data, or configuration was modified in producing the first two
-(project-state) passes; the third and fourth passes added Platform-owned
-code (`packages/Platform/Tenancy`) and documentation only, with no
-production access, deployment, or real notification at any point. Evidence
-was drawn from `docs/architecture/*`, `docs/decisions/*`,
-`RISK_REGISTER.md`, `DECISION_LOG.md`, `tests/Feature/Platform/*` (59
-files as of this pass), `git log`, local Sail-container test runs
-(including real subprocess tests proving the execution-bound mechanism),
-and read-only passes against the live production
-server (TASK-PROJECT-STATE-001/002 only).*
+real execution bound, and several activation-instruction inaccuracies),
+then TASK-OPS-MONITORING-001B (2026-09-03), a SECOND review-and-fix pass
+against that same already-hardened code that found and corrected four MORE
+real defects (an incompatible `--dry-run`/`--test-notification` flag
+combination that could silently send real mail, regex-based secret
+redaction that could itself be bypassed by unrecognized shapes — replaced
+with a structural "never forward free-form detail text to a real
+notification" guarantee — persisted state validated only by PHP type
+rather than semantically, and a docblock claim about automatic exception
+logging that the code did not actually implement, now closed via `report()`
+at every catch site), before any deployment was considered (§12/§19.1).
+None of the four monitoring passes deployed, activated, or sent any real
+notification at any point. No code, production data, or configuration was
+modified in producing the first two (project-state) passes; the third
+through fifth passes added or modified only Platform-owned code
+(`packages/Platform/Tenancy`) and documentation, with no production access,
+deployment, or real notification at any point. Evidence was drawn from
+`docs/architecture/*`, `docs/decisions/*`, `RISK_REGISTER.md`,
+`DECISION_LOG.md`, `tests/Feature/Platform/*` (59 files as of this pass;
+56 individual tests exercise `platform:production:monitor` specifically,
+across `ProductionMonitorTest.php`/`ProductionMonitorTimeoutTest.php`), `git log`,
+local Sail-container test runs (including real subprocess tests proving
+the execution-bound mechanism), and read-only passes against the live
+production server (TASK-PROJECT-STATE-001/002 only).*

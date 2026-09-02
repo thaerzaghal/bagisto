@@ -29,6 +29,7 @@
  */
 
 use Carbon\CarbonImmutable;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
@@ -371,10 +372,12 @@ test('8. an exception thrown by collectResults() is treated as a monitor failure
     expect($outcome->notificationsSent)->toBeTrue();
 
     Mail::assertSent(ProductionAlertMail::class, function (ProductionAlertMail $mail) {
-        $body = json_encode($mail->notifications);
-
-        return ! str_contains($body, '.php:')  // no stack-trace-shaped frame reference
-            && str_contains($body, 'RuntimeException');
+        // TASK-OPS-MONITORING-001B fix 2: a real notification never
+        // carries 'detail' at all any more - a STRONGER guarantee than
+        // this test originally checked for (that detail merely excluded a
+        // stack-trace-shaped reference while still safely including the
+        // exception's class name).
+        return ! isset($mail->notifications[0]['detail']);
     });
 });
 
@@ -495,7 +498,7 @@ test('14. state persists to a real file on disk and survives across separate run
     expect($reopened->read())->toBe($stored);
 });
 
-test('15. a corrupt/unreadable state file is treated as a fresh baseline, not a monitor crash', function () {
+test('15. a corrupt/unreadable top-level state file is treated as a monitor failure and is NEVER silently overwritten with a fresh baseline (TASK-OPS-MONITORING-001B fix 3 - superseded the old "treat as fresh baseline" behavior, which is exactly the defect fix 3 closes)', function () {
     Mail::fake();
 
     $state = app(ProductionMonitorState::class);
@@ -504,9 +507,15 @@ test('15. a corrupt/unreadable state file is treated as a fresh baseline, not a 
 
     $outcome = monitorRunnerWithFixedResults([readinessResult('CACHE_STORE', ReadinessStatus::Fail)])->run();
 
-    expect($outcome->monitorException)->toBeNull();
-    expect($outcome->notifications)->toHaveCount(1);
-    expect($outcome->notifications[0]['reason'])->toBe('new');
+    expect($outcome->monitorException)->not->toBeNull();
+    expect($outcome->results)->toHaveCount(1);
+    expect($outcome->results[0]->check)->toBe('Production monitor');
+    expect($outcome->results[0]->status)->toBe(ReadinessStatus::Fail);
+
+    // The corrupt file on disk must be exactly as found - never clobbered
+    // by this run's own write() (task instruction: "do not silently
+    // overwrite unreadable state with a fresh baseline").
+    expect(file_get_contents($state->stateFilePath()))->toBe('{not valid json');
 });
 
 // ---------------------------------------------------------------------
@@ -621,7 +630,7 @@ test('21. a synthetic secret in a real delivery exception never reaches persiste
     expect(json_encode($state))->not->toContain($secret);
 });
 
-test('22. a secret embedded in a check\'s own detail text (mirroring checkRedis()/checkThemeStaticAssets()\'s real exception-message-embedding pattern) is redacted before reaching the notification', function () {
+test('22. a secret embedded in a check\'s own detail text (mirroring checkRedis()/checkThemeStaticAssets()\'s real exception-message-embedding pattern) never reaches the notification at all - TASK-OPS-MONITORING-001B fix 2 replaced per-pattern redaction with structural omission (see section below for the exact bypass strings this closes)', function () {
     Mail::fake();
 
     $secret = 'SYNTHETIC_hunter2_'.Str::random(10);
@@ -630,8 +639,7 @@ test('22. a secret embedded in a check\'s own detail text (mirroring checkRedis(
     ])->run();
 
     expect($outcome->notifications)->toHaveCount(1);
-    expect($outcome->notifications[0]['detail'])->not->toContain($secret);
-    expect($outcome->notifications[0]['detail'])->toContain('[REDACTED]');
+    expect($outcome->notifications[0])->not->toHaveKey('detail');
 
     Mail::assertSent(ProductionAlertMail::class, fn (ProductionAlertMail $mail) => ! str_contains(json_encode($mail->notifications), $secret)
     );
@@ -906,4 +914,287 @@ test('39. --test-notification respects opt-in requirements - disabled or missing
 
     expect($exitCode)->not->toBe(0);
     Mail::assertNothingSent();
+});
+
+// =======================================================================
+// TASK-OPS-MONITORING-001B - review fixes.
+// =======================================================================
+
+// -----------------------------------------------------------------------
+// Finding 1: --dry-run/--test-notification is an incompatible combination
+// and must be rejected before any filesystem operation or delivery, never
+// silently prioritize sending.
+// -----------------------------------------------------------------------
+
+test('40. --dry-run and --test-notification together are rejected before any filesystem operation or delivery attempt - no mail sent, no state/lock file created, a clear diagnostic, non-zero exit', function () {
+    Mail::fake();
+
+    $state = app(ProductionMonitorState::class);
+
+    $exitCode = Artisan::call('platform:production:monitor', ['--dry-run' => true, '--test-notification' => true]);
+    $output = Artisan::output();
+
+    expect($exitCode)->not->toBe(0);
+    expect($output)->toContain('cannot be combined');
+    Mail::assertNothingSent();
+
+    // Rejected before openLockFile()/ensureDirectoryExists() ever runs -
+    // neither the state directory nor the lock file was created at all.
+    expect(is_dir(dirname($state->stateFilePath())))->toBeFalse();
+});
+
+// -----------------------------------------------------------------------
+// Finding 2: detail text structurally never reaches a real notification's
+// RENDERED mail body - the exact three shapes that previously slipped
+// past NotificationRedactor's pattern list untouched, plus a fourth,
+// deliberately unlabelled shape (no key=value/Bearer/Basic pattern at
+// all) proving this guarantee does not depend on recognizing ANY shape.
+// -----------------------------------------------------------------------
+
+test('41. a JSON-shaped secret ({"password":"..."}) in a check\'s own detail text never reaches the rendered mail body', function () {
+    Mail::fake();
+
+    monitorRunnerWithFixedResults([
+        readinessResult('Redis', ReadinessStatus::Fail, '{"password":"FAKE_JSON_SECRET_123"}'),
+    ])->run();
+
+    Mail::assertSent(ProductionAlertMail::class, function (ProductionAlertMail $mail) {
+        expect($mail->notifications[0])->not->toHaveKey('detail');
+        expect($mail->content()->htmlString)->not->toContain('FAKE_JSON_SECRET_123');
+
+        return true;
+    });
+});
+
+test('42. a space-separated key="value" secret (password="first ...") in a check\'s own detail text never reaches the rendered mail body', function () {
+    Mail::fake();
+
+    monitorRunnerWithFixedResults([
+        readinessResult('Redis', ReadinessStatus::Fail, 'password="first FAKE_SPACE_SECRET_123"'),
+    ])->run();
+
+    Mail::assertSent(ProductionAlertMail::class, function (ProductionAlertMail $mail) {
+        expect($mail->content()->htmlString)->not->toContain('FAKE_SPACE_SECRET_123');
+
+        return true;
+    });
+});
+
+test('43. an "Authorization: Basic ..." secret in a check\'s own detail text never reaches the rendered mail body', function () {
+    Mail::fake();
+
+    monitorRunnerWithFixedResults([
+        readinessResult('Redis', ReadinessStatus::Fail, 'Authorization: Basic FAKE_BASIC_SECRET_123'),
+    ])->run();
+
+    Mail::assertSent(ProductionAlertMail::class, function (ProductionAlertMail $mail) {
+        expect($mail->content()->htmlString)->not->toContain('FAKE_BASIC_SECRET_123');
+
+        return true;
+    });
+});
+
+test('44. an unlabelled synthetic secret inside exception-derived detail text (no key=value/Bearer/Basic/JSON shape at all) never reaches the rendered mail body - proves this does not depend on recognizing any particular shape', function () {
+    Mail::fake();
+
+    monitorRunnerWithFixedResults([
+        readinessResult('Theme static assets', ReadinessStatus::Fail, 'build failed while reading manifest near token FAKE_UNLABELLED_SECRET_789 in the response body'),
+    ])->run();
+
+    Mail::assertSent(ProductionAlertMail::class, function (ProductionAlertMail $mail) {
+        expect($mail->notifications[0])->not->toHaveKey('detail');
+        expect($mail->content()->htmlString)->not->toContain('FAKE_UNLABELLED_SECRET_789');
+
+        return true;
+    });
+});
+
+test('45. --test-notification\'s own single hardcoded detail string is still rendered - the one deliberate, safe-by-construction exception to fix 2', function () {
+    Mail::fake();
+
+    config(['platform-monitoring.enabled' => true, 'platform-monitoring.recipient' => 'ops@example.test']);
+    Artisan::call('platform:production:monitor', ['--test-notification' => true]);
+
+    Mail::assertSent(ProductionAlertMail::class, function (ProductionAlertMail $mail) {
+        expect($mail->notifications[0])->toHaveKey('detail');
+        expect($mail->content()->htmlString)->toContain('manually-triggered test');
+
+        return true;
+    });
+});
+
+// -----------------------------------------------------------------------
+// Finding 3: persisted state is validated SEMANTICALLY (status enum,
+// timestamp parseability, notification-field consistency), not merely by
+// PHP type - a malformed entry is dropped, never crashes outside
+// controlled failure handling, and never falsely resurrects as healthy.
+// -----------------------------------------------------------------------
+
+test('46. a persisted entry with an invalid status value is dropped - never crashes, never falsely treated as an existing/healthy incident', function () {
+    Mail::fake();
+
+    $state = app(ProductionMonitorState::class);
+    $state->ensureDirectoryExists();
+    file_put_contents($state->stateFilePath(), json_encode([
+        'checks' => [
+            'APP_DEBUG' => [
+                'status' => 'NOT_A_REAL_STATUS',
+                'since' => CarbonImmutable::now()->toIso8601String(),
+                'last_notified_status' => null,
+                'last_notified_at' => null,
+            ],
+        ],
+        'meta' => [],
+    ]));
+
+    $outcome = monitorRunnerWithFixedResults([readinessResult('APP_DEBUG', ReadinessStatus::Fail)])->run();
+
+    expect($outcome->monitorException)->toBeNull();
+    expect($outcome->corruptedEntriesDropped)->toBe(1);
+    expect($outcome->notifications)->toHaveCount(1);
+    expect($outcome->notifications[0]['reason'])->toBe('new');
+});
+
+test('47. a persisted entry with an unparseable since/last_notified_at timestamp (e.g. "NOT_A_DATE") is dropped rather than throwing a Carbon parse exception outside controlled handling', function () {
+    Mail::fake();
+
+    $state = app(ProductionMonitorState::class);
+    $state->ensureDirectoryExists();
+    file_put_contents($state->stateFilePath(), json_encode([
+        'checks' => [
+            'TRUSTED_PROXIES' => [
+                'status' => 'warn',
+                'since' => CarbonImmutable::now()->toIso8601String(),
+                'last_notified_status' => 'warn',
+                'last_notified_at' => 'NOT_A_DATE',
+            ],
+        ],
+        'meta' => [],
+    ]));
+
+    $outcome = monitorRunnerWithFixedResults([readinessResult('TRUSTED_PROXIES', ReadinessStatus::Warn)])->run();
+
+    expect($outcome->monitorException)->toBeNull();
+    expect($outcome->corruptedEntriesDropped)->toBe(1);
+    expect($outcome->notifications)->toHaveCount(1);
+    expect($outcome->notifications[0]['reason'])->toBe('new');
+});
+
+test('48. a persisted entry with inconsistent notification fields (last_notified_status set but last_notified_at null, or vice versa) is dropped', function () {
+    $state = app(ProductionMonitorState::class);
+    $state->ensureDirectoryExists();
+    file_put_contents($state->stateFilePath(), json_encode([
+        'checks' => [
+            'Redis' => [
+                'status' => 'fail',
+                'since' => CarbonImmutable::now()->toIso8601String(),
+                'last_notified_status' => 'fail',
+                'last_notified_at' => null,
+            ],
+        ],
+        'meta' => [],
+    ]));
+
+    $stored = $state->read();
+
+    expect($stored['checks'])->toBe([]);
+    expect($stored['dropped_entries'])->toBe(1);
+});
+
+test('49. a persisted entry whose last_notified_status is not an incident-shaped status (e.g. "pass") is dropped - this class never itself writes that shape', function () {
+    $state = app(ProductionMonitorState::class);
+    $state->ensureDirectoryExists();
+    $now = CarbonImmutable::now()->toIso8601String();
+    file_put_contents($state->stateFilePath(), json_encode([
+        'checks' => [
+            'CACHE_STORE' => [
+                'status' => 'warn',
+                'since' => $now,
+                'last_notified_status' => 'pass',
+                'last_notified_at' => $now,
+            ],
+        ],
+        'meta' => [],
+    ]));
+
+    $stored = $state->read();
+
+    expect($stored['checks'])->toBe([]);
+    expect($stored['dropped_entries'])->toBe(1);
+});
+
+test('50. mixed valid and invalid persisted entries: the invalid one is dropped, every valid, unrelated entry is preserved untouched', function () {
+    $state = app(ProductionMonitorState::class);
+    $state->ensureDirectoryExists();
+    $validSince = CarbonImmutable::now()->subHour()->toIso8601String();
+    file_put_contents($state->stateFilePath(), json_encode([
+        'checks' => [
+            'APP_DEBUG' => [
+                'status' => 'fail',
+                'since' => $validSince,
+                'last_notified_status' => 'fail',
+                'last_notified_at' => $validSince,
+            ],
+            'TRUSTED_PROXIES' => [
+                'status' => 'warn',
+                'since' => 'NOT_A_DATE',
+                'last_notified_status' => null,
+                'last_notified_at' => null,
+            ],
+        ],
+        'meta' => [],
+    ]));
+
+    $stored = $state->read();
+
+    expect($stored['dropped_entries'])->toBe(1);
+    expect($stored['checks'])->toHaveKey('APP_DEBUG');
+    expect($stored['checks'])->not->toHaveKey('TRUSTED_PROXIES');
+    expect($stored['checks']['APP_DEBUG'])->toBe([
+        'status' => 'fail',
+        'since' => $validSince,
+        'last_notified_status' => 'fail',
+        'last_notified_at' => $validSince,
+    ]);
+});
+
+test('51. ProductionMonitorState::read() throws (rather than silently returning an empty baseline) when the file exists but is not valid JSON in the expected top-level shape', function () {
+    $state = app(ProductionMonitorState::class);
+    $state->ensureDirectoryExists();
+    file_put_contents($state->stateFilePath(), '{"checks": "not-an-array"}');
+
+    expect(fn () => $state->read())->toThrow(RuntimeException::class);
+});
+
+// -----------------------------------------------------------------------
+// Finding 4: a caught monitor-pipeline exception is deliberately reported
+// through Laravel's own report() path - the docblock claim that this
+// already happened automatically was false; this is now true by
+// construction.
+// -----------------------------------------------------------------------
+
+test('52. a caught state-read failure is passed to Laravel\'s own exception-reporting path (report()), not silently swallowed', function () {
+    // Faked so the notification about "Production monitor" now failing
+    // (a real, expected side effect of this read failure) never attempts
+    // a real network send, which would add its OWN separate report() call
+    // on a genuine delivery exception - this test's own subject is
+    // specifically the read-failure report(), counted exactly once.
+    Mail::fake();
+
+    $handler = Mockery::mock(ExceptionHandler::class);
+    $handler->shouldReceive('report')->once()->with(Mockery::type(RuntimeException::class));
+    $handler->shouldReceive('shouldReport')->andReturn(true)->byDefault();
+    $handler->shouldReceive('render')->andReturnUsing(fn ($request, $e) => response('', 500))->byDefault();
+    app()->instance(ExceptionHandler::class, $handler);
+
+    // An unsafe configured path (ProductionMonitorState::assertSafeDirectory())
+    // - the same real, reproduced read()-failure trigger tests 27/28 already
+    // use - is a genuine caught exception at the FIRST catch site in
+    // ProductionMonitorRunner::run(), not a contrived double.
+    config(['platform-monitoring.state_path' => '']);
+    app()->forgetInstance(ProductionMonitorState::class);
+
+    $outcome = monitorRunnerWithFixedResults([readinessResult('CACHE_STORE', ReadinessStatus::Pass)])->run();
+
+    expect($outcome->monitorException)->not->toBeNull();
 });

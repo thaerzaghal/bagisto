@@ -16,12 +16,33 @@ use RuntimeException;
 use Throwable;
 
 /**
- * TASK-OPS-MONITORING-001 (hardened in TASK-OPS-MONITORING-001A - see the
- * three numbered fixes called out inline below). The decision logic behind
- * `platform:production:monitor` - reuses `ProductionReadinessCheck::
- * collectResults()` verbatim (never re-implements a single check, never
- * parses console output) and decides, against the LAST PERSISTED state,
- * whether anything is actually worth an operator's attention this run.
+ * TASK-OPS-MONITORING-001 (hardened in TASK-OPS-MONITORING-001A, then
+ * TASK-OPS-MONITORING-001B - see the numbered fixes called out inline
+ * below). The decision logic behind `platform:production:monitor` -
+ * reuses `ProductionReadinessCheck::collectResults()` verbatim (never
+ * re-implements a single check, never parses console output) and decides,
+ * against the LAST PERSISTED state, whether anything is actually worth an
+ * operator's attention this run.
+ *
+ * TASK-OPS-MONITORING-001B fix 2 - a notification NEVER carries
+ * `ReadinessCheckResult::detail` (free-form, exception-derived text - two
+ * of `platform:production:check`'s own checks embed a raw caught
+ * exception's message into it) at all. This is a STRUCTURAL guarantee,
+ * not a regex-based one: `processOne()` below builds every real
+ * (new/changed/reminder/recovered) notification array with only `check`/
+ * `reason`/`status`/`since` - fixed-shape, always-safe fields - and no
+ * code path in this class ever adds a `detail` key to one. A real,
+ * reproduced finding (TASK-OPS-MONITORING-001A's own `NotificationRedactor`
+ * pattern list) showed pattern-matching cannot be trusted as the primary
+ * guarantee - `{"password":"..."}`, `password="two words"`, and
+ * `Authorization: Basic ...` all slipped past that regex list untouched.
+ * `NotificationRedactor` still exists and is still applied (`describe()`
+ * below) as a genuine defense-in-depth layer, never as the boundary this
+ * class relies on. The ONE notification that still carries a `detail` key
+ * is the synthetic `--test-notification` message
+ * (`sendTestNotification()`) - a single, hardcoded, compile-time string
+ * literal, never derived from any exception or external input, and
+ * therefore safe by construction rather than by inspection.
  *
  * Rules (task instruction, restated as code):
  * - INFO/PASS are never incidents.
@@ -107,12 +128,31 @@ final class ProductionMonitorRunner
         // behavior as collectResults() failing.
         $priorChecks = [];
         $monitorException = null;
+        $droppedEntries = 0;
+
+        // TASK-OPS-MONITORING-001B fix 3: distinguishes a genuine
+        // top-level-corrupt state file (state->read() throwing) from every
+        // OTHER monitor failure - only this specific case skips this
+        // method's own final write() below (see that call site), so a
+        // corrupt-but-possibly-recoverable file is never silently
+        // overwritten with a fresh baseline (task instruction).
+        $stateReadFailed = false;
 
         try {
             $prior = $this->state->read();
             $priorChecks = $prior['checks'];
+            $droppedEntries = $prior['dropped_entries'];
         } catch (Throwable $e) {
+            // TASK-OPS-MONITORING-001B fix 4: report() (Laravel's own
+            // already-configured exception-reporting path, e.g.
+            // storage/logs/laravel.log) is the thing that actually makes
+            // describe()'s "(see application log for details)" text true -
+            // reported here, once, at the original catch site, with the
+            // full real message/trace this class's own notification/state
+            // boundary deliberately never sees.
+            report($e);
             $monitorException = $e;
+            $stateReadFailed = true;
         }
 
         $realResults = [];
@@ -122,6 +162,7 @@ final class ProductionMonitorRunner
                 $realResults = $this->readinessCheck->collectResults();
                 $this->assertValidResults($realResults);
             } catch (Throwable $e) {
+                report($e);
                 $monitorException = $e;
                 $realResults = [];
             }
@@ -176,7 +217,7 @@ final class ProductionMonitorRunner
             }
         }
 
-        if (! $dryRun) {
+        if (! $dryRun && ! $stateReadFailed) {
             try {
                 $this->state->write([
                     'checks' => $newChecks,
@@ -194,11 +235,12 @@ final class ProductionMonitorRunner
                 // run's own in-memory outcome is still returned, correctly
                 // reported, and correctly fails the command's exit code,
                 // it just could not be durably recorded this time.
+                report($e);
                 $monitorException ??= $e;
             }
         }
 
-        return new ProductionMonitorOutcome($results, $notifications, $sent, $deliverySkippedReason, $monitorException, $dryRun, $configurationProblem);
+        return new ProductionMonitorOutcome($results, $notifications, $sent, $deliverySkippedReason, $monitorException, $dryRun, $configurationProblem, $droppedEntries);
     }
 
     /**
@@ -233,7 +275,7 @@ final class ProductionMonitorRunner
     /**
      * @param  array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}|null  $prior
      * @param  array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>  $newChecks
-     * @param  array<int, array{check: string, reason: string, status: string, detail: string, since: string}>  $notifications
+     * @param  array<int, array{check: string, reason: string, status: string, since: string, detail?: string}>  $notifications
      */
     private function processOne(ReadinessCheckResult $result, ?array $prior, CarbonImmutable $now, array &$newChecks, array &$notifications): void
     {
@@ -245,8 +287,9 @@ final class ProductionMonitorRunner
                     'check' => $result->check,
                     'reason' => 'recovered',
                     'status' => $result->status->value,
-                    'detail' => NotificationRedactor::redact($result->detail),
                     'since' => $now->toIso8601String(),
+                    // Deliberately NO 'detail' key here - see class
+                    // docblock "TASK-OPS-MONITORING-001B fix 2".
                 ];
 
                 // Tentative: keep the PRIOR notified-incident bookkeeping
@@ -293,8 +336,9 @@ final class ProductionMonitorRunner
                 'check' => $result->check,
                 'reason' => $reason,
                 'status' => $result->status->value,
-                'detail' => NotificationRedactor::redact($result->detail),
                 'since' => $since,
+                // Deliberately NO 'detail' key here - see class docblock
+                // "TASK-OPS-MONITORING-001B fix 2".
             ];
         }
 
@@ -321,7 +365,7 @@ final class ProductionMonitorRunner
     }
 
     /**
-     * @param  array<int, array{check: string, reason: string, status: string, detail: string, since: string}>  $notifications
+     * @param  array<int, array{check: string, reason: string, status: string, since: string, detail?: string}>  $notifications
      * @param  array<string, array{status: string, since: string, last_notified_status: string|null, last_notified_at: string|null}>  $newChecks
      */
     private function commitDelivery(array $notifications, CarbonImmutable $now, array &$newChecks): void
@@ -377,7 +421,7 @@ final class ProductionMonitorRunner
      * (see `run()`) - this method's own recipient checks are a second,
      * independent layer, not the only one.
      *
-     * @param  array<int, array{check: string, reason: string, status: string, detail: string, since: string}>  $notifications
+     * @param  array<int, array{check: string, reason: string, status: string, since: string, detail?: string}>  $notifications
      * @return array{0: bool, 1: string|null}
      */
     private function deliver(array $notifications): array
@@ -419,6 +463,8 @@ final class ProductionMonitorRunner
             // instead of a silent corruption.
             Mail::mailer('smtp')->to($recipient)->send(new ProductionAlertMail($notifications, (string) config('app.name', 'Technify')));
         } catch (Throwable $e) {
+            report($e);
+
             return [false, $this->describe($e)];
         }
 
@@ -473,6 +519,8 @@ final class ProductionMonitorRunner
         try {
             Mail::mailer('smtp')->to($recipient)->send(new ProductionAlertMail([$testNotification], (string) config('app.name', 'Technify')));
         } catch (Throwable $e) {
+            report($e);
+
             return [false, $this->describe($e)];
         }
 
@@ -496,14 +544,30 @@ final class ProductionMonitorRunner
      * the app; a delivery exception could include SMTP-server-supplied
      * text) is fundamentally unbounded input this class cannot safely
      * curate - only the exception's own CLASS name is included, never its
-     * message or trace. The full exception, with its real message and
-     * stack trace, still reaches Laravel's own normal error log
-     * (unaffected by anything in this class) for a human who needs it -
-     * only THIS notification/persisted-state boundary is deliberately
-     * blind to the message text.
+     * message or trace.
+     *
+     * TASK-OPS-MONITORING-001B fix 4: every exception this class catches
+     * and describes is passed to Laravel's own `report()` helper AT ITS
+     * ORIGINAL CATCH SITE (state read/collectResults/state write/deliver/
+     * sendTestNotification - see `run()` and the two methods above), once,
+     * before this method is ever reached. `report()` is the framework's
+     * own already-configured exception-reporting path (typically
+     * `storage/logs/laravel.log`) - the full exception, with its real
+     * message and stack trace, therefore genuinely does reach a human who
+     * needs it there. An earlier version of this docblock asserted this
+     * without the code actually doing it; this is now true by construction,
+     * not merely claimed. Only THIS notification/persisted-state boundary
+     * (and this class's own console/email output) is deliberately blind to
+     * the message text.
      */
     private function describe(Throwable $e): string
     {
-        return Str::limit($e::class.' (see application log for details)', 300);
+        // NotificationRedactor::redact() is a genuine no-op against this
+        // string today (it never contains anything redactable - only a
+        // class name and a fixed suffix) - applied anyway as the
+        // documented defense-in-depth layer (TASK-OPS-MONITORING-001A),
+        // so this stays true even if a future change to this method ever
+        // adds more text here.
+        return NotificationRedactor::redact(Str::limit($e::class.' (see application log for details)', 300));
     }
 }

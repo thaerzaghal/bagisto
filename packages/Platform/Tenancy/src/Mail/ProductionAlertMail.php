@@ -27,13 +27,25 @@ use Illuminate\Queue\SerializesModels;
  *
  * Central-only by construction: nothing in this class or its caller ever
  * initializes tenant context, reads a tenant model, or reads tenant
- * business data - every `$notifications` entry is built directly from
- * `Platform\Tenancy\Support\ReadinessCheckResult`, whose own `detail`
- * strings are already the same secret-safe, tenant-data-free text
- * `platform:production:check`'s own console table has always rendered
- * (see `tests/Feature/Platform/ProductionReadinessCheckTest.php` test 5's
- * own long-standing "never prints a secret value" proof - unchanged by
- * this task).
+ * business data.
+ *
+ * TASK-OPS-MONITORING-001B fix 2: a `$notifications` entry built from a
+ * real check (reason `new`/`changed`/`reminder`/`recovered`) NEVER carries
+ * free-form `ReadinessCheckResult::detail` text - `Platform\Tenancy\
+ * Services\ProductionMonitorRunner::processOne()` structurally never adds
+ * a `detail` key for those. A real, reproduced finding showed
+ * `NotificationRedactor`'s pattern list (the ORIGINAL safety mechanism
+ * here) could be bypassed by shapes it simply didn't recognize
+ * (`{"password":"..."}`, `password="two words"`, `Authorization: Basic
+ * ...`) - regex can never be a complete guarantee against arbitrary,
+ * exception-derived text. `body()` below therefore only ever renders
+ * `check`/`reason`/`status`/`since` for a real notification, plus one
+ * fixed, static instruction line (not per-notification, never dynamic)
+ * pointing the operator at the server itself for full diagnostic detail.
+ * The ONE exception is the synthetic `--test-notification` message, whose
+ * own `detail` is a single hardcoded string literal (see
+ * `ProductionMonitorRunner::sendTestNotification()`) - safe by
+ * construction, not by inspection - so `body()` renders it when present.
  *
  * Body built as a plain pre-rendered string (`Content::$htmlString`),
  * deliberately NOT a Blade view - a real, reproduced finding while
@@ -54,11 +66,13 @@ final class ProductionAlertMail extends Mailable
     use Queueable, SerializesModels;
 
     /**
-     * @param  array<int, array{check: string, reason: string, status: string, detail: string, since: string}>  $notifications
-     *                                                                                                                          `reason` is one of 'new'|'changed'|'reminder'|'recovered';
-     *                                                                                                                          `status`/`since` are already-safe scalar strings (a
-     *                                                                                                                          `ReadinessStatus::value` and an ISO-8601 timestamp respectively),
-     *                                                                                                                          never a raw exception/object.
+     * @param  array<int, array{check: string, reason: string, status: string, since: string, detail?: string}>  $notifications
+     *                                                                                                                           `reason` is one of 'new'|'changed'|'reminder'|'recovered'|'test';
+     *                                                                                                                           `status`/`since` are already-safe scalar strings (a
+     *                                                                                                                           `ReadinessStatus::value` and an ISO-8601 timestamp respectively),
+     *                                                                                                                           never a raw exception/object. `detail` is deliberately OPTIONAL -
+     *                                                                                                                           present only for a synthetic 'test' entry (a fixed string
+     *                                                                                                                           literal), never for a real check - see class docblock.
      */
     public function __construct(
         public readonly array $notifications,
@@ -109,30 +123,43 @@ final class ProductionAlertMail extends Mailable
     /**
      * Plain, unstyled HTML (escaped values inside `<pre>`) - an operator
      * ops alert, not a themed merchant/customer email; no CSS/layout is
-     * warranted. `e()` escapes every value, including `detail`, which is
-     * config/infrastructure text (never tenant/customer data - see class
-     * docblock) but is still escaped as a matter of course for anything
-     * rendered as HTML.
+     * warranted. `e()` escapes every value.
+     *
+     * TASK-OPS-MONITORING-001B fix 2: `detail` is rendered ONLY when the
+     * notification actually carries one (`isset()`, not `??`, so a
+     * present-but-empty string still renders and an absent key never
+     * fabricates one) - true for the single synthetic `--test-notification`
+     * entry, never for a real check. A fixed, static footer line (never
+     * per-notification, never built from any check/exception text) points
+     * the operator at the server itself for full diagnostic detail, since
+     * this email deliberately no longer carries it.
      */
     private function body(): string
     {
         $lines = [];
 
         foreach ($this->notifications as $notification) {
-            $lines[] = sprintf(
-                "[%s] %s -&gt; %s\n    %s\n    since: %s\n",
+            $line = sprintf(
+                "[%s] %s -&gt; %s\n",
                 e(strtoupper($notification['reason'])),
                 e($notification['check']),
                 e(strtoupper($notification['status'])),
-                e($notification['detail']),
-                e($notification['since']),
             );
+
+            if (isset($notification['detail'])) {
+                $line .= sprintf("    %s\n", e($notification['detail']));
+            }
+
+            $line .= sprintf('    since: %s'."\n", e($notification['since']));
+
+            $lines[] = $line;
         }
 
         $body = e($this->appLabel).' - platform:production:check'."\n\n".implode("\n", $lines);
         $body .= "\n--\nThis is an automated message from platform:production:monitor. Unresolved\n"
             .'issues repeat on the configured reminder interval; a resolved check sends'
-            ."\none RECOVERED notice and then stays quiet until it changes again.";
+            ."\none RECOVERED notice and then stays quiet until it changes again. Run"
+            ."\nphp artisan platform:production:check on the server for full diagnostic detail.";
 
         return '<pre>'.$body.'</pre>';
     }
